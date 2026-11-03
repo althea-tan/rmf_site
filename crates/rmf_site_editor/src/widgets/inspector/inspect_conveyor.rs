@@ -16,11 +16,11 @@
 */
 
 use crate::{
-    site::{Anchor, Change, ConveyorHeight, Dependents},
-    widgets::{prelude::*, Inspect},
+    site::{Anchor, Change, ConveyorHeight, ConveyorThickness, ConveyorWidth, Dependents},
+    widgets::{inspector::InspectValue, prelude::*, Inspect},
 };
 use bevy::prelude::*;
-use bevy_egui::egui::{TextEdit, Ui};
+use bevy_egui::egui::Ui;
 use rmf_site_egui::WidgetSystem;
 use rmf_site_format::{ConveyorMarker, Edge};
 use std::collections::{BTreeSet, VecDeque};
@@ -31,10 +31,55 @@ pub struct InspectConveyor<'w, 's> {
     conveyors: Query<
         'w,
         's,
-        (Entity, &'static Edge<Entity>, &'static ConveyorHeight),
+        (
+            &'static Edge<Entity>,
+            &'static ConveyorHeight,
+            &'static ConveyorWidth,
+            &'static ConveyorThickness,
+        ),
         With<ConveyorMarker>,
     >,
     dependents: Query<'w, 's, &'static Dependents, With<Anchor>>,
+}
+
+impl<'w, 's> InspectConveyor<'w, 's> {
+    fn inspect_dimension<T: Component + Clone + std::fmt::Debug>(
+        &mut self,
+        ui: &mut Ui,
+        selection: Entity,
+        label: &str,
+        value: f32,
+        wrap: fn(f32) -> T,
+    ) {
+        let Some(new_value) = InspectValue::<f32>::new(label, value)
+            .clamp_range(0.001..=std::f32::INFINITY)
+            .speed(0.01)
+            .show(ui)
+        else {
+            return;
+        };
+
+        let mut visited = BTreeSet::from([selection]);
+        let mut queue = VecDeque::from([selection]);
+        while let Some(current) = queue.pop_front() {
+            if let Ok((edge, ..)) = self.conveyors.get(current) {
+                for anchor in edge.array() {
+                    if let Ok(deps) = self.dependents.get(anchor) {
+                        for &dep in deps.iter() {
+                            if self.conveyors.contains(dep) && visited.insert(dep) {
+                                queue.push_back(dep);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for conveyor in visited {
+            self.commands
+                .trigger(Change::new(wrap(new_value), conveyor));
+        }
+    }
 }
 
 impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
@@ -45,74 +90,14 @@ impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
         world: &mut World,
     ) {
         let mut params = state.get_mut(world);
-        let Ok((_, _, height)) = params.conveyors.get(selection) else {
+        let Ok((_, height, width, thickness)) = params.conveyors.get(selection) else {
             return;
         };
+        let (height, width, thickness) = (height.0, width.0, thickness.0);
 
-        let id = ui.make_persistent_id(("conveyor_height", selection));
-        let mut text = ui
-            .data_mut(|d| d.get_temp::<String>(id))
-            .unwrap_or_else(|| format!("{:.2}", height.0));
-
-        let mut changed_val = None;
-
-        ui.horizontal(|ui| {
-            ui.label("height");
-            let response = ui.add(TextEdit::singleline(&mut text).desired_width(60.0));
-            if response.changed() {
-                let mut has_dot = false;
-                let filtered: String = text
-                    .chars()
-                    .filter(|c| {
-                        if c.is_ascii_digit() {
-                            true
-                        } else if *c == '.' && !has_dot {
-                            has_dot = true;
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .collect();
-                text = filtered;
-                ui.data_mut(|d| d.insert_temp(id, text.clone()));
-
-                if let Ok(val) = text.parse::<f32>() {
-                    if val >= 0.0 && val != height.0 {
-                        changed_val = Some(val);
-                    }
-                }
-            } else if !response.has_focus() {
-                ui.data_mut(|d| d.insert_temp(id, format!("{:.2}", height.0)));
-            }
-        });
-
-        if let Some(new_height) = changed_val {
-            let mut visited = BTreeSet::new();
-            let mut queue = VecDeque::new();
-            visited.insert(selection);
-            queue.push_back(selection);
-
-            while let Some(current) = queue.pop_front() {
-                if let Ok((_, edge, _)) = params.conveyors.get(current) {
-                    for anchor in [edge.start(), edge.end()] {
-                        if let Ok(deps) = params.dependents.get(anchor) {
-                            for dep in deps.iter() {
-                                if params.conveyors.contains(*dep) && visited.insert(*dep) {
-                                    queue.push_back(*dep);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for conveyor in visited {
-                params
-                    .commands
-                    .trigger(Change::new(ConveyorHeight(new_height), conveyor));
-            }
-        }
+        params.inspect_dimension(ui, selection, "Height", height, ConveyorHeight);
+        params.inspect_dimension(ui, selection, "Width", width, ConveyorWidth);
+        params.inspect_dimension(ui, selection, "Thickness", thickness, ConveyorThickness);
         ui.add_space(10.0);
     }
 }

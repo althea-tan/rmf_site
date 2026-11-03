@@ -20,18 +20,22 @@ use crate::*;
 use bevy::prelude::{Bundle, Component, Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_CONVEYOR_HEIGHT: f32 = 0.5;
+pub const DEFAULT_CONVEYOR_WIDTH: f32 = 0.319;
+pub const DEFAULT_CONVEYOR_THICKNESS: f32 = 0.05;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bevy", derive(Bundle))]
 pub struct Conveyor<T: RefTrait> {
     pub anchors: Edge<T>,
-    #[serde(default = "default_conveyor_height")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub height: ConveyorHeight,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub width: ConveyorWidth,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub thickness: ConveyorThickness,
     #[serde(skip)]
     pub marker: ConveyorMarker,
-}
-
-fn default_conveyor_height() -> ConveyorHeight {
-    ConveyorHeight(0.5)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -40,7 +44,27 @@ pub struct ConveyorHeight(pub f32);
 
 impl Default for ConveyorHeight {
     fn default() -> Self {
-        Self(0.5)
+        Self(DEFAULT_CONVEYOR_HEIGHT)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bevy", derive(Component, Deref, DerefMut))]
+pub struct ConveyorWidth(pub f32);
+
+impl Default for ConveyorWidth {
+    fn default() -> Self {
+        Self(DEFAULT_CONVEYOR_WIDTH)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bevy", derive(Component, Deref, DerefMut))]
+pub struct ConveyorThickness(pub f32);
+
+impl Default for ConveyorThickness {
+    fn default() -> Self {
+        Self(DEFAULT_CONVEYOR_THICKNESS)
     }
 }
 
@@ -53,6 +77,8 @@ impl<T: RefTrait> From<Edge<T>> for Conveyor<T> {
         Self {
             anchors,
             height: ConveyorHeight::default(),
+            width: ConveyorWidth::default(),
+            thickness: ConveyorThickness::default(),
             marker: Default::default(),
         }
     }

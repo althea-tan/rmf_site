@@ -147,6 +147,9 @@ pub struct SiteAssets {
     pub default_mesh_grey_material: Handle<StandardMaterial>,
     pub conveyor_metal_material: Handle<StandardMaterial>,
     pub conveyor_belt_material: Handle<StandardMaterial>,
+    pub conveyor_end_mesh: Handle<Mesh>,
+    pub conveyor_stand_mesh: Handle<Mesh>,
+    pub conveyor_belt_end_mesh: Handle<Mesh>,
     pub location_tag_mesh: Handle<Mesh>,
     pub location_billboard_base_material: Handle<StandardMaterial>,
     pub location_billboard_charger_material: Handle<StandardMaterial>,
@@ -309,6 +312,17 @@ impl FromWorld for SiteAssets {
             materials.add(billboard_material(location_billboard_empty_texture));
 
         let mut meshes = world.get_resource_mut::<Assets<Mesh>>().unwrap();
+        let conveyor_end_mesh = meshes.add(
+            Mesh::from(Cylinder::new(0.5, 1.0))
+                .with_generated_outline_normals()
+                .unwrap(),
+        );
+        let conveyor_stand_mesh = meshes.add(make_conveyor_stand_mesh());
+        let conveyor_belt_end_mesh = meshes.add(
+            Mesh::from(Cylinder::new(0.5, CONVEYOR_BELT_THICKNESS))
+                .with_generated_outline_normals()
+                .unwrap(),
+        );
         let location_billboard_base_mesh =
             meshes.add(Rectangle::new(BILLBOARD_LENGTH, BILLBOARD_LENGTH / 3.0));
         let location_billboard_mesh: Handle<Mesh> =
@@ -413,6 +427,9 @@ impl FromWorld for SiteAssets {
             default_mesh_grey_material,
             conveyor_metal_material,
             conveyor_belt_material,
+            conveyor_end_mesh,
+            conveyor_stand_mesh,
+            conveyor_belt_end_mesh,
             location_tag_mesh,
             location_billboard_base_material,
             location_billboard_charger_material,

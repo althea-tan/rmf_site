@@ -278,6 +278,8 @@ impl Plugin for SitePlugin {
             ChangePlugin::<Top>::default(),
             RecallPlugin::<RecallTop>::default(),
             ChangePlugin::<ConveyorHeight>::default(),
+            ChangePlugin::<ConveyorWidth>::default(),
+            ChangePlugin::<ConveyorThickness>::default(),
         ))
         .add_plugins((
             ChangePlugin::<DoorType>::default(),
@@ -450,11 +452,10 @@ impl Plugin for SitePlugin {
         )
         .add_systems(
             PostUpdate,
-            (
-                update_changed_conveyor,
-                update_conveyor_for_moved_anchor,
-                update_conveyor_height,
-            )
+            (update_changed_conveyor, update_conveyor_for_moved_anchor)
+                .chain()
+                .after(add_conveyor_visuals)
+                .after(update_anchor_transforms)
                 .run_if(AppState::in_displaying_mode())
                 .in_set(SiteUpdateSet::BetweenTransformAndVisibility),
         )

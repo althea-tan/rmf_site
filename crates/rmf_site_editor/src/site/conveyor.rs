@@ -15,20 +15,46 @@
  *
 */
 
-use crate::site::{
-    line_stroke_transform, Anchor, AnchorParams, Category, Dependents, EdgeLabels, SiteAssets,
+use crate::site::{Anchor, AnchorParams, Category, Dependents, EdgeLabels, SiteAssets};
+use bevy::{ecs::hierarchy::ChildOf, math::Affine3A, prelude::*};
+use rmf_site_format::{
+    ConveyorHeight, ConveyorMarker, ConveyorThickness, ConveyorWidth, Edge,
+    DEFAULT_CONVEYOR_HEIGHT, DEFAULT_CONVEYOR_THICKNESS, DEFAULT_CONVEYOR_WIDTH,
 };
-use bevy::ecs::hierarchy::ChildOf;
-use bevy::prelude::*;
-use rmf_site_format::{ConveyorHeight, ConveyorMarker, Edge};
+use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
 use rmf_site_picking::Selectable;
 
-const CONVEYOR_WIDTH: f32 = 0.4;
-const CONVEYOR_THICKNESS: f32 = 0.05;
+pub(crate) const CONVEYOR_BELT_THICKNESS: f32 = 0.001;
 const CONVEYOR_BAR_SIZE: f32 = 0.03;
 const CONVEYOR_BAR_ELEVATION: f32 = 0.05;
-const CONVEYER_MARGIN: f32 = 0.02;
-const CONVEYER_BELT_THICKNESS: f32 = 0.01;
+const CONVEYOR_MARGIN: f32 = 0.0145;
+const DEFAULT_CONVEYOR_STAND_HEIGHT: f32 =
+    DEFAULT_CONVEYOR_HEIGHT - DEFAULT_CONVEYOR_THICKNESS / 2.0;
+
+pub(crate) fn make_conveyor_stand_mesh() -> Mesh {
+    let y_offset = (DEFAULT_CONVEYOR_WIDTH - CONVEYOR_BAR_SIZE) / 2.0;
+    let leg_z = -DEFAULT_CONVEYOR_STAND_HEIGHT / 2.0;
+    let bar_z = CONVEYOR_BAR_ELEVATION + CONVEYOR_BAR_SIZE / 2.0 - DEFAULT_CONVEYOR_STAND_HEIGHT;
+
+    let make_leg = |y: f32| {
+        make_cuboid(
+            CONVEYOR_BAR_SIZE,
+            CONVEYOR_BAR_SIZE,
+            DEFAULT_CONVEYOR_STAND_HEIGHT,
+        )
+        .transform_by(Affine3A::from_translation(Vec3::new(0.0, y, leg_z)))
+    };
+    let bar = make_cuboid(CONVEYOR_BAR_SIZE, DEFAULT_CONVEYOR_WIDTH, CONVEYOR_BAR_SIZE)
+        .transform_by(Affine3A::from_translation(Vec3::new(0.0, 0.0, bar_z)));
+
+    Mesh::from(
+        make_leg(-y_offset)
+            .merge_with(make_leg(y_offset))
+            .merge_with(bar),
+    )
+    .with_generated_outline_normals()
+    .unwrap()
+}
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ConveyorSegments {
@@ -38,71 +64,172 @@ pub struct ConveyorSegments {
     mid_belt: Entity,
     end: Entity,
     end_belt: Entity,
-    start_left_stand: Entity,
-    start_right_stand: Entity,
-    start_bar: Entity,
-    end_left_stand: Entity,
-    end_right_stand: Entity,
-    end_bar: Entity,
+    start_stand: Entity,
+    end_stand: Entity,
+}
+
+struct ConveyorVisuals {
+    parent_global_tf: GlobalTransform,
+    start: Transform,
+    start_belt: Transform,
+    start_stand: Transform,
+    mid: Transform,
+    mid_belt: Transform,
+    mid_mesh: Mesh,
+    mid_belt_mesh: Mesh,
+    end: Transform,
+    end_belt: Transform,
+    end_stand: Transform,
+}
+
+fn get_conveyor_anchor_position(
+    anchor: Entity,
+    label: &str,
+    conveyor: Entity,
+    anchors: &AnchorParams,
+) -> Option<Vec3> {
+    match anchors.point_in_parent_frame_of(anchor, Category::Conveyor, conveyor) {
+        Ok(p) => Some(p.with_z(0.0)),
+        Err(_) => {
+            error!("Failed to find {label} anchor {anchor:?} for conveyor {conveyor:?}");
+            None
+        }
+    }
+}
+
+fn make_conveyor_visuals(
+    entity: Entity,
+    edge: &Edge<Entity>,
+    height: f32,
+    width: f32,
+    thickness: f32,
+    anchors: &AnchorParams,
+    child_of: &Query<&ChildOf>,
+    global_transforms: &Query<&GlobalTransform>,
+) -> Option<ConveyorVisuals> {
+    let start_anchor = get_conveyor_anchor_position(edge.start(), "start", entity, anchors)?;
+    let end_anchor = get_conveyor_anchor_position(edge.end(), "end", entity, anchors)?;
+    let center = (start_anchor + end_anchor) / 2.0;
+
+    // Sync GlobalTransform to align end caps and resize mid mesh within the same frame.
+    let parent_global_tf = child_of
+        .get(entity)
+        .ok()
+        .and_then(|c| global_transforms.get(c.parent()).ok())
+        .copied()
+        .unwrap_or(GlobalTransform::IDENTITY);
+
+    let width = width.max(0.001);
+    let thickness = thickness.max(0.001);
+    let belt_width = (width - CONVEYOR_MARGIN).max(0.001);
+    let belt_z = (thickness + CONVEYOR_BELT_THICKNESS) / 2.0;
+    let flat_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+
+    let start_to_end = end_anchor - start_anchor;
+    let length = start_to_end.length();
+    let direction = if length > 0.001 {
+        start_to_end / length
+    } else {
+        Vec3::X
+    };
+    let rot = Quat::from_rotation_z(start_to_end.y.atan2(start_to_end.x));
+
+    let stand_height = (height - thickness / 2.0).max(0.001);
+    let stand_scale = Vec3::new(
+        1.0,
+        width / DEFAULT_CONVEYOR_WIDTH,
+        stand_height / DEFAULT_CONVEYOR_STAND_HEIGHT,
+    );
+    let offset = (width / 2.0 + CONVEYOR_BAR_SIZE / 2.0).min(length / 2.0);
+
+    let end_transforms = |anchor_pos: Vec3, stand_center: Vec3| {
+        let end_cap = Transform::from_xyz(anchor_pos.x, anchor_pos.y, height)
+            .with_rotation(flat_rotation)
+            .with_scale(Vec3::new(width, thickness, width));
+        let belt = Transform::from_xyz(anchor_pos.x, anchor_pos.y, height + belt_z)
+            .with_rotation(flat_rotation)
+            .with_scale(Vec3::new(belt_width, 1.0, belt_width));
+        let stand = Transform::from_xyz(stand_center.x, stand_center.y, stand_height)
+            .with_rotation(rot)
+            .with_scale(stand_scale);
+        (end_cap, belt, stand)
+    };
+
+    let (start, start_belt, start_stand) =
+        end_transforms(start_anchor, start_anchor + direction * offset);
+    let (end, end_belt, end_stand) = end_transforms(end_anchor, end_anchor - direction * offset);
+
+    let mid = Transform::from_xyz(center.x, center.y, height).with_rotation(rot);
+    let mid_belt = Transform::from_xyz(center.x, center.y, height + belt_z).with_rotation(rot);
+
+    // Bake dimensions into the cuboid mesh to ensure uniform outline normals are generated.
+    let mesh_length = length.max(0.001);
+    let make_mid_mesh = |width: f32, thickness: f32| {
+        Mesh::from(Cuboid::new(mesh_length, width, thickness))
+            .with_generated_outline_normals()
+            .inspect_err(|err| error!("Failed to generate conveyor outline normals: {err}"))
+            .ok()
+    };
+    let mid_mesh = make_mid_mesh(width, thickness)?;
+    let mid_belt_mesh = make_mid_mesh(belt_width, CONVEYOR_BELT_THICKNESS)?;
+
+    Some(ConveyorVisuals {
+        parent_global_tf,
+        start,
+        start_belt,
+        start_stand,
+        mid,
+        mid_belt,
+        mid_mesh,
+        mid_belt_mesh,
+        end,
+        end_belt,
+        end_stand,
+    })
 }
 
 pub fn add_conveyor_visuals(
     mut commands: Commands,
-    conveyors: Query<(Entity, &Edge<Entity>, Option<&ConveyorHeight>), Added<ConveyorMarker>>,
+    new_conveyors: Query<
+        (
+            Entity,
+            &Edge<Entity>,
+            &ConveyorHeight,
+            &ConveyorWidth,
+            &ConveyorThickness,
+        ),
+        Added<ConveyorMarker>,
+    >,
     mut dependents: Query<&mut Dependents, With<Anchor>>,
+    child_of: Query<&ChildOf>,
+    global_transforms: Query<&GlobalTransform>,
     anchors: AnchorParams,
-    mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<SiteAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if conveyors.is_empty() {
+    if new_conveyors.is_empty() {
         return;
     }
 
-    let cylinder_mesh = meshes.add(Cylinder::new(CONVEYOR_WIDTH / 2.0, CONVEYOR_THICKNESS));
-    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, CONVEYOR_THICKNESS));
-    let stand_mesh = meshes.add(Cuboid::new(CONVEYOR_BAR_SIZE, CONVEYOR_BAR_SIZE, 1.0));
-    let bar_mesh = meshes.add(Cuboid::new(
-        CONVEYOR_BAR_SIZE,
-        CONVEYOR_WIDTH,
-        CONVEYOR_BAR_SIZE,
-    ));
-    let belt_cylinder_mesh = meshes.add(Cylinder::new(
-        CONVEYOR_WIDTH / 2.0 - CONVEYER_MARGIN,
-        CONVEYER_BELT_THICKNESS,
-    ));
-    let belt_cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, CONVEYER_BELT_THICKNESS));
-
-    let flat_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-
-    for (e, edge, conveyor_height) in &conveyors {
+    for (e, edge, height, width, thickness) in &new_conveyors {
         for anchor in &edge.array() {
             if let Ok(mut deps) = dependents.get_mut(*anchor) {
                 deps.insert(e);
             }
         }
 
-        let start_anchor = anchors
-            .point_in_parent_frame_of(edge.start(), Category::Conveyor, e)
-            .unwrap();
-        let end_anchor = anchors
-            .point_in_parent_frame_of(edge.end(), Category::Conveyor, e)
-            .unwrap();
-
-        let dp = end_anchor - start_anchor;
-        let length = dp.length();
-        let u = if length > 0.001 { dp / length } else { Vec3::X };
-        let v = Vec3::new(-u.y, u.x, 0.0);
-        let rot = Quat::from_rotation_z(dp.y.atan2(dp.x));
-
-        let height = conveyor_height.map(|h| h.0).unwrap_or(0.5);
-        let stand_height = (height - CONVEYOR_THICKNESS / 2.0).max(0.001);
-        let stand_z = stand_height / 2.0 - height;
-        let bar_z = CONVEYOR_BAR_ELEVATION + CONVEYOR_BAR_SIZE / 2.0 - height;
-
-        let offset = (CONVEYOR_WIDTH / 2.0 + CONVEYOR_BAR_SIZE / 2.0).min(length / 2.0);
-        let start_center = start_anchor + u * offset;
-        let end_center = end_anchor - u * offset;
-        let y_offset = v * ((CONVEYOR_WIDTH - CONVEYOR_BAR_SIZE) / 2.0);
+        let Some(visuals) = make_conveyor_visuals(
+            e,
+            edge,
+            height.0,
+            width.0,
+            thickness.0,
+            &anchors,
+            &child_of,
+            &global_transforms,
+        ) else {
+            continue;
+        };
 
         let mut spawn_segment = |tf, mesh, mat| {
             commands
@@ -110,6 +237,7 @@ pub fn add_conveyor_visuals(
                     Mesh3d(mesh),
                     MeshMaterial3d(mat),
                     tf,
+                    visuals.parent_global_tf.mul_transform(tf),
                     Visibility::Inherited,
                     ChildOf(e),
                     Selectable::new(e),
@@ -117,112 +245,42 @@ pub fn add_conveyor_visuals(
                 .id()
         };
 
-        let belt_z = (CONVEYOR_THICKNESS + CONVEYER_BELT_THICKNESS) / 2.0;
-
-        let start = spawn_segment(
-            Transform::from_xyz(start_anchor.x, start_anchor.y, 0.0).with_rotation(flat_rotation),
-            cylinder_mesh.clone(),
+        let mid = spawn_segment(
+            visuals.mid,
+            meshes.add(visuals.mid_mesh),
             assets.conveyor_metal_material.clone(),
         );
-
-        let start_belt = spawn_segment(
-            Transform::from_xyz(start_anchor.x, start_anchor.y, belt_z)
-                .with_rotation(flat_rotation),
-            belt_cylinder_mesh.clone(),
-            assets.conveyor_belt_material.clone(),
-        );
-
-        let start_left_stand = spawn_segment(
-            Transform::from_xyz(
-                start_center.x - y_offset.x,
-                start_center.y - y_offset.y,
-                stand_z,
-            )
-            .with_rotation(rot)
-            .with_scale(Vec3::new(1.0, 1.0, stand_height)),
-            stand_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let start_right_stand = spawn_segment(
-            Transform::from_xyz(
-                start_center.x + y_offset.x,
-                start_center.y + y_offset.y,
-                stand_z,
-            )
-            .with_rotation(rot)
-            .with_scale(Vec3::new(1.0, 1.0, stand_height)),
-            stand_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let start_bar = spawn_segment(
-            Transform::from_xyz(start_center.x, start_center.y, bar_z).with_rotation(rot),
-            bar_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let end = spawn_segment(
-            Transform::from_xyz(end_anchor.x, end_anchor.y, 0.0).with_rotation(flat_rotation),
-            cylinder_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let end_belt = spawn_segment(
-            Transform::from_xyz(end_anchor.x, end_anchor.y, belt_z)
-                .with_rotation(flat_rotation),
-            belt_cylinder_mesh.clone(),
-            assets.conveyor_belt_material.clone(),
-        );
-
-        let end_left_stand = spawn_segment(
-            Transform::from_xyz(
-                end_center.x - y_offset.x,
-                end_center.y - y_offset.y,
-                stand_z,
-            )
-            .with_rotation(rot)
-            .with_scale(Vec3::new(1.0, 1.0, stand_height)),
-            stand_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let end_right_stand = spawn_segment(
-            Transform::from_xyz(
-                end_center.x + y_offset.x,
-                end_center.y + y_offset.y,
-                stand_z,
-            )
-            .with_rotation(rot)
-            .with_scale(Vec3::new(1.0, 1.0, stand_height)),
-            stand_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let end_bar = spawn_segment(
-            Transform::from_xyz(end_center.x, end_center.y, bar_z).with_rotation(rot),
-            bar_mesh.clone(),
-            assets.conveyor_metal_material.clone(),
-        );
-
-        let mut mid_tf = line_stroke_transform(&start_anchor, &end_anchor, CONVEYOR_WIDTH);
-        mid_tf.translation.z = 0.0;
-        let mid = spawn_segment(mid_tf, cube_mesh.clone(), assets.conveyor_metal_material.clone());
-
-        let mut mid_belt_tf = line_stroke_transform(
-            &start_anchor,
-            &end_anchor,
-            CONVEYOR_WIDTH - 2.0 * CONVEYER_MARGIN,
-        );
-        mid_belt_tf.translation.z = belt_z;
         let mid_belt = spawn_segment(
-            mid_belt_tf,
-            belt_cube_mesh.clone(),
+            visuals.mid_belt,
+            meshes.add(visuals.mid_belt_mesh),
             assets.conveyor_belt_material.clone(),
         );
 
-        let mut entity_commands = commands.entity(e);
-        entity_commands.insert((
+        let mut spawn_end = |end_cap_tf, belt_tf, stand_tf| {
+            (
+                spawn_segment(
+                    end_cap_tf,
+                    assets.conveyor_end_mesh.clone(),
+                    assets.conveyor_metal_material.clone(),
+                ),
+                spawn_segment(
+                    belt_tf,
+                    assets.conveyor_belt_end_mesh.clone(),
+                    assets.conveyor_belt_material.clone(),
+                ),
+                spawn_segment(
+                    stand_tf,
+                    assets.conveyor_stand_mesh.clone(),
+                    assets.conveyor_metal_material.clone(),
+                ),
+            )
+        };
+        let (start, start_belt, start_stand) =
+            spawn_end(visuals.start, visuals.start_belt, visuals.start_stand);
+        let (end, end_belt, end_stand) =
+            spawn_end(visuals.end, visuals.end_belt, visuals.end_stand);
+
+        commands.entity(e).insert((
             ConveyorSegments {
                 start,
                 start_belt,
@@ -230,21 +288,15 @@ pub fn add_conveyor_visuals(
                 mid_belt,
                 end,
                 end_belt,
-                start_left_stand,
-                start_right_stand,
-                start_bar,
-                end_left_stand,
-                end_right_stand,
-                end_bar,
+                start_stand,
+                end_stand,
             },
-            Transform::from_xyz(0.0, 0.0, height),
+            Transform::IDENTITY,
+            visuals.parent_global_tf,
             Visibility::Inherited,
             Category::Conveyor,
             EdgeLabels::StartEnd,
         ));
-        if conveyor_height.is_none() {
-            entity_commands.insert(ConveyorHeight(height));
-        }
     }
 }
 
@@ -252,108 +304,63 @@ fn update_conveyor_visuals(
     entity: Entity,
     edge: &Edge<Entity>,
     segments: &ConveyorSegments,
-    conveyor_height: Option<&ConveyorHeight>,
-    anchors: &AnchorParams,
-    transforms: &mut Query<&mut Transform>,
+    height: f32,
+    width: f32,
+    thickness: f32,
+    child_of: &Query<&ChildOf>,
+    tf_params: &mut ParamSet<(
+        (AnchorParams, Query<&GlobalTransform>),
+        Query<(&mut Transform, &mut GlobalTransform), Without<Anchor>>,
+    )>,
+    mesh_handles: &Query<&Mesh3d>,
+    meshes: &mut Assets<Mesh>,
 ) {
-    let start_anchor = anchors
-        .point_in_parent_frame_of(edge.left(), Category::Conveyor, entity)
-        .unwrap();
-    let end_anchor = anchors
-        .point_in_parent_frame_of(edge.right(), Category::Conveyor, entity)
-        .unwrap();
+    let Some(visuals) = ({
+        let (anchors, global_transforms) = tf_params.p0();
+        make_conveyor_visuals(
+            entity,
+            edge,
+            height,
+            width,
+            thickness,
+            &anchors,
+            child_of,
+            &global_transforms,
+        )
+    }) else {
+        return;
+    };
 
-    let flat_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    let belt_z = (CONVEYOR_THICKNESS + CONVEYER_BELT_THICKNESS) / 2.0;
-
-    if let Ok(mut tf) = transforms.get_mut(segments.start) {
-        *tf = Transform::from_xyz(start_anchor.x, start_anchor.y, 0.0).with_rotation(flat_rotation);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.start_belt) {
-        *tf = Transform::from_xyz(start_anchor.x, start_anchor.y, belt_z)
-            .with_rotation(flat_rotation);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.mid) {
-        let mut mid_tf = line_stroke_transform(&start_anchor, &end_anchor, CONVEYOR_WIDTH);
-        mid_tf.translation.z = 0.0;
-        *tf = mid_tf;
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.mid_belt) {
-        let mut mid_belt_tf = line_stroke_transform(
-            &start_anchor,
-            &end_anchor,
-            CONVEYOR_WIDTH - 2.0 * CONVEYER_MARGIN,
-        );
-        mid_belt_tf.translation.z = belt_z;
-        *tf = mid_belt_tf;
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.end) {
-        *tf = Transform::from_xyz(end_anchor.x, end_anchor.y, 0.0).with_rotation(flat_rotation);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.end_belt) {
-        *tf = Transform::from_xyz(end_anchor.x, end_anchor.y, belt_z)
-            .with_rotation(flat_rotation);
+    for (e, new_mesh) in [
+        (segments.mid, visuals.mid_mesh),
+        (segments.mid_belt, visuals.mid_belt_mesh),
+    ] {
+        if let Ok(mesh_handle) = mesh_handles.get(e) {
+            if let Some(mesh) = meshes.get_mut(&mesh_handle.0) {
+                *mesh = new_mesh;
+            }
+        }
     }
 
-    let dp = end_anchor - start_anchor;
-    let length = dp.length();
-    let u = if length > 0.001 { dp / length } else { Vec3::X };
-    let v = Vec3::new(-u.y, u.x, 0.0);
-    let rot = Quat::from_rotation_z(dp.y.atan2(dp.x));
-
-    let height = conveyor_height.map(|h| h.0).unwrap_or(0.5);
-    let stand_height = (height - CONVEYOR_THICKNESS / 2.0).max(0.001);
-    let stand_z = stand_height / 2.0 - height;
-    let bar_z = CONVEYOR_BAR_ELEVATION + CONVEYOR_BAR_SIZE / 2.0 - height;
-
-    let offset = (CONVEYOR_WIDTH / 2.0 + CONVEYOR_BAR_SIZE / 2.0).min(length / 2.0);
-    let start_center = start_anchor + u * offset;
-    let end_center = end_anchor - u * offset;
-    let y_offset = v * ((CONVEYOR_WIDTH - CONVEYOR_BAR_SIZE) / 2.0);
-
-    if let Ok(mut tf) = transforms.get_mut(segments.start_left_stand) {
-        tf.translation = Vec3::new(
-            start_center.x - y_offset.x,
-            start_center.y - y_offset.y,
-            stand_z,
-        );
-        tf.rotation = rot;
-        tf.scale = Vec3::new(1.0, 1.0, stand_height);
+    let mut transforms = tf_params.p1();
+    if let Ok((mut tf, mut global_tf)) = transforms.get_mut(entity) {
+        *tf = Transform::IDENTITY;
+        *global_tf = visuals.parent_global_tf;
     }
-    if let Ok(mut tf) = transforms.get_mut(segments.start_right_stand) {
-        tf.translation = Vec3::new(
-            start_center.x + y_offset.x,
-            start_center.y + y_offset.y,
-            stand_z,
-        );
-        tf.rotation = rot;
-        tf.scale = Vec3::new(1.0, 1.0, stand_height);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.start_bar) {
-        tf.translation = Vec3::new(start_center.x, start_center.y, bar_z);
-        tf.rotation = rot;
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.end_left_stand) {
-        tf.translation = Vec3::new(
-            end_center.x - y_offset.x,
-            end_center.y - y_offset.y,
-            stand_z,
-        );
-        tf.rotation = rot;
-        tf.scale = Vec3::new(1.0, 1.0, stand_height);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.end_right_stand) {
-        tf.translation = Vec3::new(
-            end_center.x + y_offset.x,
-            end_center.y + y_offset.y,
-            stand_z,
-        );
-        tf.rotation = rot;
-        tf.scale = Vec3::new(1.0, 1.0, stand_height);
-    }
-    if let Ok(mut tf) = transforms.get_mut(segments.end_bar) {
-        tf.translation = Vec3::new(end_center.x, end_center.y, bar_z);
-        tf.rotation = rot;
+    for (e, seg_tf) in [
+        (segments.start, visuals.start),
+        (segments.start_belt, visuals.start_belt),
+        (segments.start_stand, visuals.start_stand),
+        (segments.mid, visuals.mid),
+        (segments.mid_belt, visuals.mid_belt),
+        (segments.end, visuals.end),
+        (segments.end_belt, visuals.end_belt),
+        (segments.end_stand, visuals.end_stand),
+    ] {
+        if let Ok((mut tf, mut global_tf)) = transforms.get_mut(e) {
+            *tf = seg_tf;
+            *global_tf = visuals.parent_global_tf.mul_transform(seg_tf);
+        }
     }
 }
 
@@ -363,11 +370,12 @@ pub fn update_conveyor_for_moved_anchor(
             Entity,
             &Edge<Entity>,
             &ConveyorSegments,
-            Option<&ConveyorHeight>,
+            &ConveyorHeight,
+            &ConveyorWidth,
+            &ConveyorThickness,
         ),
         With<ConveyorMarker>,
     >,
-    anchors: AnchorParams,
     changed_anchors: Query<
         &Dependents,
         (
@@ -375,12 +383,29 @@ pub fn update_conveyor_for_moved_anchor(
             Or<(Changed<Anchor>, Changed<GlobalTransform>)>,
         ),
     >,
-    mut transforms: Query<&mut Transform>,
+    child_of: Query<&ChildOf>,
+    mut tf_params: ParamSet<(
+        (AnchorParams, Query<&GlobalTransform>),
+        Query<(&mut Transform, &mut GlobalTransform), Without<Anchor>>,
+    )>,
+    mesh_handles: Query<&Mesh3d>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     for dependents in &changed_anchors {
         for dependent in dependents.iter() {
-            if let Ok((e, edge, segments, height)) = conveyors.get(*dependent) {
-                update_conveyor_visuals(e, edge, segments, height, &anchors, &mut transforms);
+            if let Ok((e, edge, segments, height, width, thickness)) = conveyors.get(*dependent) {
+                update_conveyor_visuals(
+                    e,
+                    edge,
+                    segments,
+                    height.0,
+                    width.0,
+                    thickness.0,
+                    &child_of,
+                    &mut tf_params,
+                    &mesh_handles,
+                    &mut meshes,
+                );
             }
         }
     }
@@ -392,47 +417,40 @@ pub fn update_changed_conveyor(
             Entity,
             &Edge<Entity>,
             &ConveyorSegments,
-            Option<&ConveyorHeight>,
+            &ConveyorHeight,
+            &ConveyorWidth,
+            &ConveyorThickness,
         ),
-        (With<ConveyorMarker>, Changed<Edge<Entity>>),
+        (
+            With<ConveyorMarker>,
+            Or<(
+                Changed<Edge<Entity>>,
+                Changed<ConveyorHeight>,
+                Changed<ConveyorWidth>,
+                Changed<ConveyorThickness>,
+            )>,
+        ),
     >,
-    anchors: AnchorParams,
-    mut transforms: Query<&mut Transform>,
+    child_of: Query<&ChildOf>,
+    mut tf_params: ParamSet<(
+        (AnchorParams, Query<&GlobalTransform>),
+        Query<(&mut Transform, &mut GlobalTransform), Without<Anchor>>,
+    )>,
+    mesh_handles: Query<&Mesh3d>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    for (e, edge, segments, height) in &conveyors {
-        update_conveyor_visuals(e, edge, segments, height, &anchors, &mut transforms);
-    }
-}
-
-pub fn update_conveyor_height(
-    mut conveyors: Query<
-        (&ConveyorHeight, &ConveyorSegments, &mut Transform),
-        (With<ConveyorMarker>, Changed<ConveyorHeight>),
-    >,
-    mut transforms: Query<&mut Transform, Without<ConveyorMarker>>,
-) {
-    for (height, segments, mut tf) in &mut conveyors {
-        tf.translation.z = height.0;
-        let stand_height = (height.0 - CONVEYOR_THICKNESS / 2.0).max(0.001);
-        let stand_z = stand_height / 2.0 - height.0;
-        let bar_z = CONVEYOR_BAR_ELEVATION + CONVEYOR_BAR_SIZE / 2.0 - height.0;
-
-        for stand_entity in [
-            segments.start_left_stand,
-            segments.start_right_stand,
-            segments.end_left_stand,
-            segments.end_right_stand,
-        ] {
-            if let Ok(mut stand_tf) = transforms.get_mut(stand_entity) {
-                stand_tf.translation.z = stand_z;
-                stand_tf.scale.z = stand_height;
-            }
-        }
-
-        for bar_entity in [segments.start_bar, segments.end_bar] {
-            if let Ok(mut bar_tf) = transforms.get_mut(bar_entity) {
-                bar_tf.translation.z = bar_z;
-            }
-        }
+    for (e, edge, segments, height, width, thickness) in &conveyors {
+        update_conveyor_visuals(
+            e,
+            edge,
+            segments,
+            height.0,
+            width.0,
+            thickness.0,
+            &child_of,
+            &mut tf_params,
+            &mesh_handles,
+            &mut meshes,
+        );
     }
 }
