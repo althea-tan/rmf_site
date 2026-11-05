@@ -117,7 +117,7 @@ impl OutlineVisualization {
 #[derive(Component)]
 pub struct SuppressOutline;
 
-pub fn add_outline_visualization(
+pub fn add_outline_ordinary_visualization(
     mut commands: Commands,
     new_entities: Query<
         Entity,
@@ -135,7 +135,6 @@ pub fn add_outline_visualization(
                 Added<LightKind>,
                 Added<LocationTags>,
                 Added<PrimitiveShape>,
-                Added<ConveyorMarker>,
             )>,
             Without<VisualMeshMarker>,
             Without<CollisionMeshMarker>,
@@ -145,7 +144,19 @@ pub fn add_outline_visualization(
     for e in &new_entities {
         commands
             .entity(e)
-            .insert(OutlineVisualization::default())
+            .insert(OutlineVisualization::Ordinary)
+            .insert(Selectable::new(e));
+    }
+}
+
+pub fn add_outline_silhouette_visualization(
+    mut commands: Commands,
+    new_entities: Query<Entity, Added<ConveyorMarker>>,
+) {
+    for e in &new_entities {
+        commands
+            .entity(e)
+            .insert(OutlineVisualization::Silhouette)
             .insert(Selectable::new(e));
     }
 }

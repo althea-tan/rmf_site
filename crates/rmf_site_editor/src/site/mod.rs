@@ -452,7 +452,11 @@ impl Plugin for SitePlugin {
         )
         .add_systems(
             PostUpdate,
-            (update_changed_conveyor, update_conveyor_for_moved_anchor)
+            (
+                update_conveyor_dimensions,
+                update_changed_conveyor,
+                update_conveyor_for_moved_anchor,
+            )
                 .chain()
                 .after(add_conveyor_visuals)
                 .after(update_anchor_transforms)

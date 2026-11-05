@@ -16,14 +16,13 @@
 */
 
 use crate::{
-    site::{Anchor, Change, ConveyorHeight, ConveyorThickness, ConveyorWidth, Dependents},
+    site::{Change, ConveyorHeight, ConveyorThickness, ConveyorWidth},
     widgets::{inspector::InspectValue, prelude::*, Inspect},
 };
 use bevy::prelude::*;
 use bevy_egui::egui::Ui;
 use rmf_site_egui::WidgetSystem;
-use rmf_site_format::{ConveyorMarker, Edge};
-use std::collections::{BTreeSet, VecDeque};
+use rmf_site_format::ConveyorMarker;
 
 #[derive(SystemParam)]
 pub struct InspectConveyor<'w, 's> {
@@ -32,54 +31,12 @@ pub struct InspectConveyor<'w, 's> {
         'w,
         's,
         (
-            &'static Edge<Entity>,
             &'static ConveyorHeight,
             &'static ConveyorWidth,
             &'static ConveyorThickness,
         ),
         With<ConveyorMarker>,
     >,
-    dependents: Query<'w, 's, &'static Dependents, With<Anchor>>,
-}
-
-impl<'w, 's> InspectConveyor<'w, 's> {
-    fn inspect_dimension<T: Component + Clone + std::fmt::Debug>(
-        &mut self,
-        ui: &mut Ui,
-        selection: Entity,
-        label: &str,
-        value: f32,
-        wrap: fn(f32) -> T,
-    ) {
-        let Some(new_value) = InspectValue::<f32>::new(label, value)
-            .clamp_range(0.001..=std::f32::INFINITY)
-            .speed(0.01)
-            .show(ui)
-        else {
-            return;
-        };
-
-        let mut visited = BTreeSet::from([selection]);
-        let mut queue = VecDeque::from([selection]);
-        while let Some(current) = queue.pop_front() {
-            if let Ok((edge, ..)) = self.conveyors.get(current) {
-                for anchor in edge.array() {
-                    if let Ok(deps) = self.dependents.get(anchor) {
-                        for &dep in deps.iter() {
-                            if self.conveyors.contains(dep) && visited.insert(dep) {
-                                queue.push_back(dep);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for conveyor in visited {
-            self.commands
-                .trigger(Change::new(wrap(new_value), conveyor));
-        }
-    }
 }
 
 impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
@@ -90,14 +47,37 @@ impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
         world: &mut World,
     ) {
         let mut params = state.get_mut(world);
-        let Ok((_, height, width, thickness)) = params.conveyors.get(selection) else {
+        let Ok((height, width, thickness)) = params.conveyors.get(selection) else {
             return;
         };
-        let (height, width, thickness) = (height.0, width.0, thickness.0);
 
-        params.inspect_dimension(ui, selection, "Height", height, ConveyorHeight);
-        params.inspect_dimension(ui, selection, "Width", width, ConveyorWidth);
-        params.inspect_dimension(ui, selection, "Thickness", thickness, ConveyorThickness);
+        if let Some(new_height) = InspectValue::<f32>::new("Height", height.0)
+            .clamp_range(0.001..=std::f32::INFINITY)
+            .speed(0.01)
+            .show(ui)
+        {
+            params
+                .commands
+                .trigger(Change::new(ConveyorHeight(new_height), selection));
+        }
+        if let Some(new_width) = InspectValue::<f32>::new("Width", width.0)
+            .clamp_range(0.001..=std::f32::INFINITY)
+            .speed(0.01)
+            .show(ui)
+        {
+            params
+                .commands
+                .trigger(Change::new(ConveyorWidth(new_width), selection));
+        }
+        if let Some(new_thickness) = InspectValue::<f32>::new("Thickness", thickness.0)
+            .clamp_range(0.001..=std::f32::INFINITY)
+            .speed(0.01)
+            .show(ui)
+        {
+            params
+                .commands
+                .trigger(Change::new(ConveyorThickness(new_thickness), selection));
+        }
         ui.add_space(10.0);
     }
 }

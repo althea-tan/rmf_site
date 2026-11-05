@@ -256,7 +256,9 @@ impl<'w, 's> AnchorSelection<'w, 's> {
 
     pub fn replace_side(&mut self, edge: Entity, side: Side, category: Category) -> bool {
         let scope = match category {
-            Category::Lane | Category::Wall | Category::Door => AnchorScope::General,
+            Category::Lane | Category::Wall | Category::Door | Category::Conveyor => {
+                AnchorScope::General
+            }
             Category::Measurement => AnchorScope::Drawing,
             Category::Lift => AnchorScope::Site,
             _ => return false,

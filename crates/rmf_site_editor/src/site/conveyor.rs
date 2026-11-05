@@ -15,7 +15,9 @@
  *
 */
 
-use crate::site::{Anchor, AnchorParams, Category, Dependents, EdgeLabels, SiteAssets};
+use crate::site::{
+    Anchor, AnchorParams, Category, Dependents, EdgeLabels, Original, Pending, SiteAssets,
+};
 use bevy::{ecs::hierarchy::ChildOf, math::Affine3A, prelude::*};
 use rmf_site_format::{
     ConveyorHeight, ConveyorMarker, ConveyorThickness, ConveyorWidth, Edge,
@@ -23,6 +25,7 @@ use rmf_site_format::{
 };
 use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
 use rmf_site_picking::Selectable;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) const CONVEYOR_BELT_THICKNESS: f32 = 0.001;
 const CONVEYOR_BAR_SIZE: f32 = 0.03;
@@ -69,7 +72,8 @@ pub struct ConveyorSegments {
 }
 
 struct ConveyorVisuals {
-    parent_global_tf: GlobalTransform,
+    root: Transform,
+    root_global_tf: GlobalTransform,
     start: Transform,
     start_belt: Transform,
     start_stand: Transform,
@@ -110,6 +114,9 @@ fn make_conveyor_visuals(
     let start_anchor = get_conveyor_anchor_position(edge.start(), "start", entity, anchors)?;
     let end_anchor = get_conveyor_anchor_position(edge.end(), "end", entity, anchors)?;
     let center = (start_anchor + end_anchor) / 2.0;
+    let local_start = start_anchor - center;
+    let local_end = end_anchor - center;
+    let root = Transform::from_xyz(center.x, center.y, height);
 
     // Sync GlobalTransform to align end caps and resize mid mesh within the same frame.
     let parent_global_tf = child_of
@@ -118,6 +125,7 @@ fn make_conveyor_visuals(
         .and_then(|c| global_transforms.get(c.parent()).ok())
         .copied()
         .unwrap_or(GlobalTransform::IDENTITY);
+    let root_global_tf = parent_global_tf.mul_transform(root);
 
     let width = width.max(0.001);
     let thickness = thickness.max(0.001);
@@ -135,6 +143,7 @@ fn make_conveyor_visuals(
     let rot = Quat::from_rotation_z(start_to_end.y.atan2(start_to_end.x));
 
     let stand_height = (height - thickness / 2.0).max(0.001);
+    let stand_z = stand_height - height;
     let stand_scale = Vec3::new(
         1.0,
         width / DEFAULT_CONVEYOR_WIDTH,
@@ -143,24 +152,24 @@ fn make_conveyor_visuals(
     let offset = (width / 2.0 + CONVEYOR_BAR_SIZE / 2.0).min(length / 2.0);
 
     let end_transforms = |anchor_pos: Vec3, stand_center: Vec3| {
-        let end_cap = Transform::from_xyz(anchor_pos.x, anchor_pos.y, height)
+        let end_cap = Transform::from_xyz(anchor_pos.x, anchor_pos.y, 0.0)
             .with_rotation(flat_rotation)
             .with_scale(Vec3::new(width, thickness, width));
-        let belt = Transform::from_xyz(anchor_pos.x, anchor_pos.y, height + belt_z)
+        let belt = Transform::from_xyz(anchor_pos.x, anchor_pos.y, belt_z)
             .with_rotation(flat_rotation)
             .with_scale(Vec3::new(belt_width, 1.0, belt_width));
-        let stand = Transform::from_xyz(stand_center.x, stand_center.y, stand_height)
+        let stand = Transform::from_xyz(stand_center.x, stand_center.y, stand_z)
             .with_rotation(rot)
             .with_scale(stand_scale);
         (end_cap, belt, stand)
     };
 
     let (start, start_belt, start_stand) =
-        end_transforms(start_anchor, start_anchor + direction * offset);
-    let (end, end_belt, end_stand) = end_transforms(end_anchor, end_anchor - direction * offset);
+        end_transforms(local_start, local_start + direction * offset);
+    let (end, end_belt, end_stand) = end_transforms(local_end, local_end - direction * offset);
 
-    let mid = Transform::from_xyz(center.x, center.y, height).with_rotation(rot);
-    let mid_belt = Transform::from_xyz(center.x, center.y, height + belt_z).with_rotation(rot);
+    let mid = Transform::from_rotation(rot);
+    let mid_belt = Transform::from_xyz(0.0, 0.0, belt_z).with_rotation(rot);
 
     // Bake dimensions into the cuboid mesh to ensure uniform outline normals are generated.
     let mesh_length = length.max(0.001);
@@ -174,7 +183,8 @@ fn make_conveyor_visuals(
     let mid_belt_mesh = make_mid_mesh(belt_width, CONVEYOR_BELT_THICKNESS)?;
 
     Some(ConveyorVisuals {
-        parent_global_tf,
+        root,
+        root_global_tf,
         start,
         start_belt,
         start_stand,
@@ -237,7 +247,7 @@ pub fn add_conveyor_visuals(
                     Mesh3d(mesh),
                     MeshMaterial3d(mat),
                     tf,
-                    visuals.parent_global_tf.mul_transform(tf),
+                    visuals.root_global_tf.mul_transform(tf),
                     Visibility::Inherited,
                     ChildOf(e),
                     Selectable::new(e),
@@ -291,12 +301,185 @@ pub fn add_conveyor_visuals(
                 start_stand,
                 end_stand,
             },
-            Transform::IDENTITY,
-            visuals.parent_global_tf,
+            visuals.root,
+            visuals.root_global_tf,
             Visibility::Inherited,
             Category::Conveyor,
             EdgeLabels::StartEnd,
         ));
+    }
+}
+
+fn collect_connected_conveyors(
+    start_entity: Entity,
+    start_edge: &Edge<Entity>,
+    get_edge: impl Fn(Entity) -> Option<Edge<Entity>>,
+    dependents: &Query<&Dependents, With<Anchor>>,
+) -> Vec<Entity> {
+    // BFS to find the connected conveyor chain.
+    let mut visited_conveyors = vec![start_entity];
+    let mut visited_conveyor_set = HashSet::from([start_entity]);
+    let mut anchor_queue = VecDeque::from(start_edge.array());
+    let mut visited_anchors = HashSet::from(start_edge.array());
+
+    while let Some(anchor) = anchor_queue.pop_front() {
+        let Ok(deps) = dependents.get(anchor) else {
+            continue;
+        };
+        for &other_entity in deps.iter() {
+            if !visited_conveyor_set.insert(other_entity) {
+                continue;
+            }
+            let Some(other_edge) = get_edge(other_entity) else {
+                continue;
+            };
+            visited_conveyors.push(other_entity);
+            for next_anchor in other_edge.array() {
+                if visited_anchors.insert(next_anchor) {
+                    anchor_queue.push_back(next_anchor);
+                }
+            }
+        }
+    }
+    visited_conveyors
+}
+
+pub fn update_conveyor_dimensions(
+    mut conveyors: Query<
+        (
+            Entity,
+            Ref<Edge<Entity>>,
+            &mut ConveyorHeight,
+            &mut ConveyorWidth,
+            &mut ConveyorThickness,
+            Option<&Pending>,
+            Option<&Original<Edge<Entity>>>,
+        ),
+        With<ConveyorMarker>,
+    >,
+    dependents: Query<&Dependents, With<Anchor>>,
+    mut removed_pending: RemovedComponents<Pending>,
+    mut removed_original_edges: RemovedComponents<Original<Edge<Entity>>>,
+) {
+    let placed_conveyors: HashSet<Entity> = removed_pending
+        .read()
+        .chain(removed_original_edges.read())
+        .collect();
+
+    // Collect conveyors whose endpoints, dimensions, or placement state changed.
+    let mut changed_dims: HashSet<Entity> = HashSet::new();
+    let changed_conveyors: Vec<Entity> = conveyors
+        .iter_mut()
+        .filter_map(|(e, edge, h, w, t, _, original)| {
+            // Skip conveyors that are mid-replacement.
+            if original.is_some() {
+                return None;
+            }
+            let dim_changed = h.is_changed() || w.is_changed() || t.is_changed();
+            if dim_changed {
+                changed_dims.insert(e);
+            }
+            (edge.is_changed() || dim_changed || placed_conveyors.contains(&e)).then_some(e)
+        })
+        .collect();
+
+    if changed_conveyors.is_empty() {
+        return;
+    }
+
+    let mut visited: HashSet<Entity> = HashSet::new();
+    let mut updates: HashMap<Entity, (f32, f32, f32)> = HashMap::new();
+
+    for e in changed_conveyors {
+        let Ok((_, edge, _, _, _, pending, original)) = conveyors.get(e) else {
+            continue;
+        };
+        if original.is_some() {
+            continue;
+        }
+        if pending.is_none() && visited.contains(&e) {
+            continue;
+        }
+
+        let connected_conveyors = collect_connected_conveyors(
+            e,
+            &edge,
+            |other_e| {
+                let (_, other_edge, _, _, _, other_pending, other_original) =
+                    conveyors.get(other_e).ok()?;
+                (other_pending.is_none() && other_original.is_none()).then_some(*other_edge)
+            },
+            &dependents,
+        );
+
+        if pending.is_some() {
+            // If previewing a new conveyor, adopt neighbor dimensions or fall back to defaults
+            let neighbor_dims = connected_conveyors.iter().find_map(|&member| {
+                if member == e {
+                    return None;
+                }
+                let (_, _, h, w, t, ..) = conveyors.get(member).ok()?;
+                Some((h.0, w.0, t.0))
+            });
+            let dims = neighbor_dims.unwrap_or((
+                DEFAULT_CONVEYOR_HEIGHT,
+                DEFAULT_CONVEYOR_WIDTH,
+                DEFAULT_CONVEYOR_THICKNESS,
+            ));
+            updates.insert(e, dims);
+        } else {
+            // If it is a placed chain, prioritize inspector dimension edits over existing
+            // stationary members, falling back to the newly connected segment's dimensions.
+            let mut edited_dims = None;
+            let mut existing_dims = None;
+            let mut fallback_dims = None;
+
+            for &member in &connected_conveyors {
+                let Ok((_, member_edge, h, w, t, member_pending, member_original)) =
+                    conveyors.get(member)
+                else {
+                    continue;
+                };
+                if member_pending.is_some() || member_original.is_some() {
+                    continue;
+                }
+                visited.insert(member);
+
+                let member_edge_changed =
+                    member_edge.is_changed() || placed_conveyors.contains(&member);
+                let dims = (h.0, w.0, t.0);
+                if !member_edge_changed && changed_dims.contains(&member) {
+                    edited_dims = Some(dims);
+                }
+                if !member_edge_changed && existing_dims.is_none() {
+                    existing_dims = Some(dims);
+                }
+                if fallback_dims.is_none() {
+                    fallback_dims = Some(dims);
+                }
+            }
+
+            if let Some(dims) = edited_dims.or(existing_dims).or(fallback_dims) {
+                for member in connected_conveyors {
+                    updates.insert(member, dims);
+                }
+            }
+        }
+    }
+
+    // Apply dimension updates only when values differ.
+    for (entity, (new_h, new_w, new_t)) in updates {
+        if let Ok((_, _, mut height, mut width, mut thickness, ..)) = conveyors.get_mut(entity) {
+            if height.0 != new_h {
+                height.0 = new_h;
+            }
+            if width.0 != new_w {
+                width.0 = new_w;
+            }
+            if thickness.0 != new_t {
+                thickness.0 = new_t;
+            }
+        }
     }
 }
 
@@ -344,8 +527,13 @@ fn update_conveyor_visuals(
 
     let mut transforms = tf_params.p1();
     if let Ok((mut tf, mut global_tf)) = transforms.get_mut(entity) {
-        *tf = Transform::IDENTITY;
-        *global_tf = visuals.parent_global_tf;
+        // Update Transform to ensure that entity is not overwritten with stale
+        // local coordinates on next frame
+        *tf = visuals.root;
+
+        // Override GlobalTransform to prevent mesh from being rendered at old
+        // coordinates during delayed frame propagation
+        *global_tf = visuals.root_global_tf;
     }
     for (e, seg_tf) in [
         (segments.start, visuals.start),
@@ -359,7 +547,7 @@ fn update_conveyor_visuals(
     ] {
         if let Ok((mut tf, mut global_tf)) = transforms.get_mut(e) {
             *tf = seg_tf;
-            *global_tf = visuals.parent_global_tf.mul_transform(seg_tf);
+            *global_tf = visuals.root_global_tf.mul_transform(seg_tf);
         }
     }
 }
