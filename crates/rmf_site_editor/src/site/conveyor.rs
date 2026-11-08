@@ -327,12 +327,17 @@ fn collect_connected_conveyors(
             continue;
         };
         for &other_entity in deps.iter() {
-            if !visited_conveyor_set.insert(other_entity) {
+            if visited_conveyor_set.contains(&other_entity) {
                 continue;
             }
             let Some(other_edge) = get_edge(other_entity) else {
                 continue;
             };
+            // Ignore stale dependents whose endpoints no longer reference this anchor.
+            if other_edge.start() != anchor && other_edge.end() != anchor {
+                continue;
+            }
+            visited_conveyor_set.insert(other_entity);
             visited_conveyors.push(other_entity);
             for next_anchor in other_edge.array() {
                 if visited_anchors.insert(next_anchor) {
