@@ -453,6 +453,7 @@ impl Plugin for SitePlugin {
         .add_systems(
             PostUpdate,
             (
+                add_conveyor_ports,
                 update_conveyor_dimensions,
                 update_changed_conveyor,
                 update_conveyor_for_moved_anchor,

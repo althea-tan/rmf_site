@@ -83,3 +83,29 @@ impl<T: RefTrait> From<Edge<T>> for Conveyor<T> {
         }
     }
 }
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConveyorPortDirection {
+    #[default]
+    In,
+    Out,
+}
+
+impl ConveyorPortDirection {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Out => "out",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bevy", derive(Component))]
+pub struct ConveyorPort {
+    pub direction: ConveyorPortDirection,
+    pub location: [f32; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+}

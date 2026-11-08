@@ -16,15 +16,25 @@
 */
 
 use crate::site::{
-    Anchor, AnchorParams, Category, Dependents, EdgeLabels, Original, Pending, SiteAssets,
+    Anchor, AnchorBundle, AnchorParams, Category, Dependents, EdgeLabels, Original, Pending,
+    SiteAssets, Subordinate,
 };
-use bevy::{ecs::hierarchy::ChildOf, math::Affine3A, prelude::*};
+use bevy::{
+    ecs::{hierarchy::ChildOf, relationship::AncestorIter},
+    gltf::GltfSceneExtras,
+    math::Affine3A,
+    prelude::*,
+    render::view::RenderLayers,
+};
+use rmf_site_camera::MODEL_PREVIEW_LAYER;
 use rmf_site_format::{
-    ConveyorHeight, ConveyorMarker, ConveyorThickness, ConveyorWidth, Edge,
-    DEFAULT_CONVEYOR_HEIGHT, DEFAULT_CONVEYOR_THICKNESS, DEFAULT_CONVEYOR_WIDTH,
+    ConveyorHeight, ConveyorMarker, ConveyorPort, ConveyorPortDirection, ConveyorThickness,
+    ConveyorWidth, Edge, Group, ModelMarker, Scale, DEFAULT_CONVEYOR_HEIGHT,
+    DEFAULT_CONVEYOR_THICKNESS, DEFAULT_CONVEYOR_WIDTH,
 };
 use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
-use rmf_site_picking::Selectable;
+use rmf_site_picking::{Preview, Selectable};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) const CONVEYOR_BELT_THICKNESS: f32 = 0.001;
@@ -645,5 +655,77 @@ pub fn update_changed_conveyor(
             &mesh_handles,
             &mut meshes,
         );
+    }
+}
+
+fn spawn_conveyor_port(
+    commands: &mut Commands,
+    model_entity: Entity,
+    model_global_tf: &GlobalTransform,
+    model_scale: Vec3,
+    port: ConveyorPort,
+) -> Entity {
+    let scaled_pos = Vec3::from_array(port.location) * model_scale;
+    let anchor = Anchor::Translate2D([scaled_pos.x, scaled_pos.y]);
+
+    commands
+        .spawn(AnchorBundle::new(anchor).parent_transform(model_global_tf))
+        .insert((
+            Subordinate(Some(model_entity)),
+            port,
+            ChildOf(model_entity),
+        ))
+        .id()
+}
+
+pub fn add_conveyor_ports(
+    mut commands: Commands,
+    new_scene_extras: Query<(Entity, &GltfSceneExtras), Added<GltfSceneExtras>>,
+    child_of: Query<&ChildOf>,
+    models: Query<
+        (
+            Entity,
+            &Scale,
+            &GlobalTransform,
+            Option<&RenderLayers>,
+        ),
+        (
+            With<ModelMarker>,
+            Without<Group>,
+            Without<Pending>,
+            Without<Preview>,
+        ),
+    >,
+) {
+    for (entity, extras) in &new_scene_extras {
+        let Some(ports) = serde_json::from_str::<Value>(&extras.value)
+            .ok()
+            .and_then(|v| v.get("conveyor_ports").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<ConveyorPort>>(v).ok())
+        else {
+            continue;
+        };
+
+        // Find the owning model instance for the spawned scene root
+        let Some((model_entity, scale, model_global_tf, render_layers)) =
+            AncestorIter::new(&child_of, entity).find_map(|ancestor| models.get(ancestor).ok())
+        else {
+            continue;
+        };
+
+        // Skip models rendered only in the offscreen asset preview camera
+        if render_layers.is_some_and(|r| r.iter().all(|l| l == MODEL_PREVIEW_LAYER)) {
+            continue;
+        }
+
+        for port in ports {
+            spawn_conveyor_port(
+                &mut commands,
+                model_entity,
+                model_global_tf,
+                scale.0,
+                port,
+            );
+        }
     }
 }
