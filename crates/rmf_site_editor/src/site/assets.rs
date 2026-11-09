@@ -150,6 +150,9 @@ pub struct SiteAssets {
     pub conveyor_end_mesh: Handle<Mesh>,
     pub conveyor_stand_mesh: Handle<Mesh>,
     pub conveyor_belt_end_mesh: Handle<Mesh>,
+    pub conveyor_port_arrow_mesh: Handle<Mesh>,
+    pub conveyor_port_in_material: Handle<StandardMaterial>,
+    pub conveyor_port_out_material: Handle<StandardMaterial>,
     pub location_tag_mesh: Handle<Mesh>,
     pub location_billboard_base_material: Handle<StandardMaterial>,
     pub location_billboard_charger_material: Handle<StandardMaterial>,
@@ -171,13 +174,20 @@ pub fn old_default_material(base_color: Color) -> StandardMaterial {
     }
 }
 
-pub fn billboard_material(base_color_texture: Handle<Image>) -> StandardMaterial {
+fn billboard_material(base_color: Color) -> StandardMaterial {
     StandardMaterial {
-        base_color_texture: Some(base_color_texture),
+        base_color,
         alpha_mode: AlphaMode::Blend,
         depth_bias: 15.0,
         unlit: true,
         ..default()
+    }
+}
+
+pub fn billboard_texture_material(texture: Handle<Image>) -> StandardMaterial {
+    StandardMaterial {
+        base_color_texture: Some(texture),
+        ..billboard_material(Color::WHITE)
     }
 }
 
@@ -298,18 +308,22 @@ impl FromWorld for SiteAssets {
             perceptual_roughness: 0.8,
             ..default()
         });
+        let conveyor_port_in_material =
+            materials.add(billboard_material(Color::srgba(0.0, 1.0, 0.0, 0.5)));
+        let conveyor_port_out_material =
+            materials.add(billboard_material(Color::srgba(1.0, 0.0, 0.0, 0.5)));
 
         let location_billboard_base_material =
-            materials.add(billboard_material(location_billboard_base_texture));
+            materials.add(billboard_texture_material(location_billboard_base_texture));
         let location_billboard_charger_material: Handle<StandardMaterial> =
-            materials.add(billboard_material(charger_texture));
+            materials.add(billboard_texture_material(charger_texture));
         let location_billboard_holding_point_material =
-            materials.add(billboard_material(holding_point_texture));
+            materials.add(billboard_texture_material(holding_point_texture));
         let location_billboard_parking_material =
-            materials.add(billboard_material(parking_texture));
-        let lockpad_material = materials.add(billboard_material(lockpad_texture));
+            materials.add(billboard_texture_material(parking_texture));
+        let lockpad_material = materials.add(billboard_texture_material(lockpad_texture));
         let location_billboard_empty_material =
-            materials.add(billboard_material(location_billboard_empty_texture));
+            materials.add(billboard_texture_material(location_billboard_empty_texture));
 
         let mut meshes = world.get_resource_mut::<Assets<Mesh>>().unwrap();
         let conveyor_end_mesh = meshes.add(
@@ -323,6 +337,7 @@ impl FromWorld for SiteAssets {
                 .with_generated_outline_normals()
                 .unwrap(),
         );
+        let conveyor_port_arrow_mesh = meshes.add(make_downward_triangular_arrow_mesh());
         let location_billboard_base_mesh =
             meshes.add(Rectangle::new(BILLBOARD_LENGTH, BILLBOARD_LENGTH / 3.0));
         let location_billboard_mesh: Handle<Mesh> =
@@ -430,6 +445,9 @@ impl FromWorld for SiteAssets {
             conveyor_end_mesh,
             conveyor_stand_mesh,
             conveyor_belt_end_mesh,
+            conveyor_port_arrow_mesh,
+            conveyor_port_in_material,
+            conveyor_port_out_material,
             location_tag_mesh,
             location_billboard_base_material,
             location_billboard_charger_material,

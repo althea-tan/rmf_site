@@ -15,9 +15,12 @@
  *
 */
 
-use crate::site::{
-    Anchor, AnchorBundle, AnchorParams, Category, Dependents, EdgeLabels, Original, Pending,
-    SiteAssets, Subordinate,
+use crate::{
+    interaction::billboard::Billboard,
+    site::{
+        Anchor, AnchorBundle, AnchorParams, Category, Dependents, EdgeLabels, Original, Pending,
+        SiteAssets, Subordinate,
+    },
 };
 use bevy::{
     ecs::{hierarchy::ChildOf, relationship::AncestorIter},
@@ -26,6 +29,7 @@ use bevy::{
     prelude::*,
     render::view::RenderLayers,
 };
+use bevy_rich_text3d::*;
 use rmf_site_camera::MODEL_PREVIEW_LAYER;
 use rmf_site_format::{
     ConveyorHeight, ConveyorMarker, ConveyorPort, ConveyorPortDirection, ConveyorThickness,
@@ -35,7 +39,10 @@ use rmf_site_format::{
 use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
 use rmf_site_picking::{Preview, Selectable};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    num::NonZero,
+};
 
 pub(crate) const CONVEYOR_BELT_THICKNESS: f32 = 0.001;
 const CONVEYOR_BAR_SIZE: f32 = 0.03;
@@ -43,6 +50,7 @@ const CONVEYOR_BAR_ELEVATION: f32 = 0.05;
 const CONVEYOR_MARGIN: f32 = 0.0145;
 const DEFAULT_CONVEYOR_STAND_HEIGHT: f32 =
     DEFAULT_CONVEYOR_HEIGHT - DEFAULT_CONVEYOR_THICKNESS / 2.0;
+const CONVEYOR_PORT_TEXT_OFFSET: f32 = 0.2;
 
 pub(crate) fn make_conveyor_stand_mesh() -> Mesh {
     let y_offset = (DEFAULT_CONVEYOR_WIDTH - CONVEYOR_BAR_SIZE) / 2.0;
@@ -67,6 +75,11 @@ pub(crate) fn make_conveyor_stand_mesh() -> Mesh {
     )
     .with_generated_outline_normals()
     .unwrap()
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ConveyorPortSegments {
+    root: Entity,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -726,6 +739,86 @@ pub fn add_conveyor_ports(
                 scale.0,
                 port,
             );
+        }
+    }
+}
+
+pub fn add_conveyor_port_visuals(
+    mut commands: Commands,
+    new_ports: Query<(Entity, &ConveyorPort, &ChildOf), Added<ConveyorPort>>,
+    models: Query<&Scale, With<ModelMarker>>,
+    assets: Res<SiteAssets>,
+) {
+    for (e, port, child_of) in &new_ports {
+        let Ok(scale) = models.get(child_of.parent()) else {
+            continue;
+        };
+        let z = port.location[2] * scale.0.z;
+
+        let arrow_material = match port.direction {
+            ConveyorPortDirection::In => assets.conveyor_port_in_material.clone(),
+            ConveyorPortDirection::Out => assets.conveyor_port_out_material.clone(),
+        };
+
+        let text = commands
+            .spawn((
+                Text3d::new(port.direction.label()),
+                Text3dStyling {
+                    size: 250.0,
+                    weight: Weight(900),
+                    stroke: NonZero::new(15),
+                    color: Srgba::BLACK,
+                    stroke_color: Srgba::WHITE,
+                    world_scale: Some(Vec2::splat(0.1)),
+                    layer_offset: 0.001,
+                    align: TextAlign::Center,
+                    anchor: TextAnchor::BOTTOM_CENTER,
+                    ..Default::default()
+                },
+                Mesh3d::default(),
+                MeshMaterial3d(assets.text3d_material.clone()),
+                Transform::from_xyz(0.0, CONVEYOR_PORT_TEXT_OFFSET, 0.0),
+            ))
+            .id();
+
+        let arrow = commands
+            .spawn((
+                Mesh3d(assets.conveyor_port_arrow_mesh.clone()),
+                MeshMaterial3d(arrow_material),
+                Billboard::default(),
+            ))
+            .add_child(text)
+            .id();
+
+        let root = commands
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, z),
+                Visibility::default(),
+                ChildOf(e),
+            ))
+            .add_child(arrow)
+            .id();
+
+        commands.entity(e).insert(ConveyorPortSegments { root });
+    }
+}
+
+pub fn update_conveyor_ports(
+    models: Query<(&Scale, &Children), (With<ModelMarker>, Changed<Scale>)>,
+    mut ports: Query<(&mut Anchor, &mut ConveyorPort, &ConveyorPortSegments)>,
+    mut transforms: Query<&mut Transform>,
+) {
+    for (scale, children) in &models {
+        for child in children.iter() {
+            let Ok((mut anchor, mut port, segments)) = ports.get_mut(child) else {
+                continue;
+            };
+            let scaled_pos = Vec3::from_array(port.location) * scale.0;
+            *anchor = Anchor::Translate2D([scaled_pos.x, scaled_pos.y]);
+            if let Ok(mut visual_tf) = transforms.get_mut(segments.root) {
+                visual_tf.translation.z = scaled_pos.z;
+            }
+            port.set_changed();
         }
     }
 }

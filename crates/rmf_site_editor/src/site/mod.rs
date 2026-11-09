@@ -454,6 +454,8 @@ impl Plugin for SitePlugin {
             PostUpdate,
             (
                 add_conveyor_ports,
+                add_conveyor_port_visuals,
+                update_conveyor_ports,
                 update_conveyor_dimensions,
                 update_changed_conveyor,
                 update_conveyor_for_moved_anchor,

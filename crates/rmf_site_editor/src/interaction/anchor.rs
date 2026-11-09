@@ -51,7 +51,7 @@ pub fn add_anchor_visual_cues(
         };
 
         let body_mesh = match category {
-            Category::Level => site_assets.level_anchor_mesh.clone(),
+            Category::Level | Category::Model => site_assets.level_anchor_mesh.clone(),
             Category::Lift => site_assets.lift_anchor_mesh.clone(),
             _ => site_assets.site_anchor_mesh.clone(),
         };
