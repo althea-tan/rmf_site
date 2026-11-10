@@ -32,8 +32,8 @@ use bevy::{
 use bevy_rich_text3d::*;
 use rmf_site_camera::MODEL_PREVIEW_LAYER;
 use rmf_site_format::{
-    ConveyorHeight, ConveyorMarker, ConveyorPort, ConveyorPortDirection, ConveyorThickness,
-    ConveyorWidth, Edge, Group, ModelMarker, Scale, DEFAULT_CONVEYOR_HEIGHT,
+    Affiliation, ConveyorHeight, ConveyorMarker, ConveyorPort, ConveyorPortDirection,
+    ConveyorThickness, ConveyorWidth, Edge, Group, ModelMarker, Scale, DEFAULT_CONVEYOR_HEIGHT,
     DEFAULT_CONVEYOR_THICKNESS, DEFAULT_CONVEYOR_WIDTH,
 };
 use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
@@ -77,10 +77,20 @@ pub(crate) fn make_conveyor_stand_mesh() -> Mesh {
     .unwrap()
 }
 
+/// Marker component indicating that a model instance acts as a conveyor node
+/// and can have conveyor ports attached or edited in the Inspector.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConveyorNode;
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ConveyorPortSegments {
     root: Entity,
 }
+
+/// Stored on a model description entity acting as a conveyor node so newly
+/// spawned instances are registered as conveyor nodes and inherit configured ports.
+#[derive(Component, Clone, Debug, Default)]
+pub struct ConveyorNodePortConfigs(pub Option<Vec<ConveyorPort>>);
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ConveyorSegments {
@@ -784,6 +794,21 @@ fn spawn_conveyor_port(
 pub fn add_conveyor_ports(
     mut commands: Commands,
     new_scene_extras: Query<(Entity, &GltfSceneExtras), Added<GltfSceneExtras>>,
+    new_models: Query<
+        (
+            Entity,
+            &Scale,
+            &GlobalTransform,
+            &Affiliation<Entity>,
+        ),
+        (
+            With<ModelMarker>,
+            Without<Group>,
+            Without<Pending>,
+            Without<Preview>,
+            Added<GlobalTransform>,
+        ),
+    >,
     child_of: Query<&ChildOf>,
     models: Query<
         (
@@ -791,6 +816,7 @@ pub fn add_conveyor_ports(
             &Scale,
             &GlobalTransform,
             Option<&RenderLayers>,
+            &Affiliation<Entity>,
         ),
         (
             With<ModelMarker>,
@@ -799,7 +825,29 @@ pub fn add_conveyor_ports(
             Without<Preview>,
         ),
     >,
+    conveyor_node_port_configs: Query<&ConveyorNodePortConfigs>,
 ) {
+    // Spawn ports configured on the model description for newly placed conveyor node instances
+    for (model_entity, scale, model_global_tf, affiliation) in &new_models {
+        let Some(port_configs) = affiliation
+            .0
+            .and_then(|desc| conveyor_node_port_configs.get(desc).ok())
+        else {
+            continue;
+        };
+
+        commands.entity(model_entity).insert(ConveyorNode);
+
+        let Some(ports) = &port_configs.0 else {
+            continue;
+        };
+
+        for port in ports.iter().cloned() {
+            spawn_conveyor_port(&mut commands, model_entity, model_global_tf, scale.0, port);
+        }
+    }
+
+    // Spawn ports defined in embedded GLTF extras when a model scene finishes loading
     for (entity, extras) in &new_scene_extras {
         let Some(ports) = serde_json::from_str::<Value>(&extras.value)
             .ok()
@@ -810,8 +858,13 @@ pub fn add_conveyor_ports(
         };
 
         // Find the owning model instance for the spawned scene root
-        let Some((model_entity, scale, model_global_tf, render_layers)) =
-            AncestorIter::new(&child_of, entity).find_map(|ancestor| models.get(ancestor).ok())
+        let Some((
+            model_entity,
+            scale,
+            model_global_tf,
+            render_layers,
+            affiliation,
+        )) = AncestorIter::new(&child_of, entity).find_map(|ancestor| models.get(ancestor).ok())
         else {
             continue;
         };
@@ -819,6 +872,25 @@ pub fn add_conveyor_ports(
         // Skip models rendered only in the offscreen asset preview camera
         if render_layers.is_some_and(|r| r.iter().all(|l| l == MODEL_PREVIEW_LAYER)) {
             continue;
+        }
+
+        // Skip GLTF ports if the model description already has a port configuration
+        let has_desc_override = affiliation
+            .0
+            .and_then(|desc| conveyor_node_port_configs.get(desc).ok())
+            .is_some_and(|cfg| cfg.0.is_some());
+
+        if has_desc_override {
+            continue;
+        }
+
+        commands.entity(model_entity).insert(ConveyorNode);
+        if let Some(desc_entity) = affiliation.0 {
+            if !conveyor_node_port_configs.contains(desc_entity) {
+                commands
+                    .entity(desc_entity)
+                    .insert(ConveyorNodePortConfigs(None));
+            }
         }
 
         for port in ports {
