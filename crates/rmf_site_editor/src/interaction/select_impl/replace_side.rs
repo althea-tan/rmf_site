@@ -22,7 +22,7 @@ use crate::{
 use anyhow::Error as Anyhow;
 use bevy::prelude::*;
 use crossflow::*;
-use rmf_site_format::{Edge, Side};
+use rmf_site_format::{Edge, Group, ModelMarker, Side};
 use std::borrow::Borrow;
 
 pub fn spawn_replace_side_service(
@@ -84,13 +84,14 @@ impl ReplaceSide {
         edges: &mut Query<&mut Edge<Entity>>,
         parents: &Query<&ChildOf>,
         lifts: &Query<(), With<LiftCabin<Entity>>>,
+        models: &Query<(), (With<ModelMarker>, Without<Group>)>,
         cursor_anchor: Entity,
         commands: &mut Commands,
     ) -> Result<bool, Option<Anyhow>> {
         let original = self.original.or_broken_buffer()?;
         if self.level_consistency && chosen != cursor_anchor {
             let a = original.array()[self.side.index()];
-            if !are_anchors_siblings(a, chosen, &parents, &lifts)? {
+            if !are_anchors_siblings(a, chosen, &parents, &lifts, &models)? {
                 warn!("Unable to use selected anchor because it is on an incompatible level");
                 return Ok(false);
             }
@@ -143,6 +144,7 @@ pub fn replace_side_setup(
     mut edges: Query<&mut Edge<Entity>>,
     parents: Query<&ChildOf>,
     lifts: Query<(), With<LiftCabin<Entity>>>,
+    models: Query<(), (With<ModelMarker>, Without<Group>)>,
     cursor: Res<Cursor>,
     mut commands: Commands,
 ) -> SelectionNodeResult {
@@ -158,6 +160,7 @@ pub fn replace_side_setup(
         &mut edges,
         &parents,
         &lifts,
+        &models,
         cursor.level_anchor_placement,
         &mut commands,
     )?;
@@ -178,6 +181,7 @@ pub fn on_hover_for_replace_side(
     mut edges: Query<&mut Edge<Entity>>,
     parents: Query<&ChildOf>,
     lifts: Query<(), With<LiftCabin<Entity>>>,
+    models: Query<(), (With<ModelMarker>, Without<Group>)>,
     mut commands: Commands,
 ) -> SelectionNodeResult {
     let mut access = access.get_mut(&key).or_broken_buffer()?;
@@ -199,6 +203,7 @@ pub fn on_hover_for_replace_side(
         &mut edges,
         &parents,
         &lifts,
+        &models,
         cursor.level_anchor_placement,
         &mut commands,
     )?;
@@ -212,6 +217,7 @@ pub fn on_select_for_replace_side(
     mut edges: Query<&mut Edge<Entity>>,
     parents: Query<&ChildOf>,
     lifts: Query<(), With<LiftCabin<Entity>>>,
+    models: Query<(), (With<ModelMarker>, Without<Group>)>,
     cursor: Res<Cursor>,
     mut commands: Commands,
 ) -> SelectionNodeResult {
@@ -222,6 +228,7 @@ pub fn on_select_for_replace_side(
         &mut edges,
         &parents,
         &lifts,
+        &models,
         cursor.level_anchor_placement,
         &mut commands,
     )? {
@@ -239,6 +246,7 @@ pub fn cleanup_replace_side(
     mut edges: Query<&'static mut Edge<Entity>>,
     parents: Query<&ChildOf>,
     lifts: Query<(), With<LiftCabin<Entity>>>,
+    models: Query<(), (With<ModelMarker>, Without<Group>)>,
     cursor: Res<Cursor>,
     mut commands: Commands,
 ) -> SelectionNodeResult {
@@ -266,6 +274,7 @@ pub fn cleanup_replace_side(
         &mut edges,
         &parents,
         &lifts,
+        &models,
         cursor.level_anchor_placement,
         &mut commands,
     )?;

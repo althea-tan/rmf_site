@@ -628,6 +628,7 @@ pub struct AnchorFilter<'w, 's> {
     drawings: Query<'w, 's, &'static PixelsPerMeter, With<DrawingMarker>>,
     child_of: Query<'w, 's, &'static ChildOf>,
     levels: Query<'w, 's, (), With<LevelElevation>>,
+    models: Query<'w, 's, (), (With<ModelMarker>, Without<Group>)>,
     lifts: Query<
         'w,
         's,
@@ -767,7 +768,8 @@ impl<'w, 's> AnchorFilter<'w, 's> {
                 let is_level = || self.levels.contains(parent);
                 let is_lift =
                     || AncestorIter::new(&self.child_of, target).any(|e| self.lifts.contains(e));
-                if is_site() || is_level() || is_lift() {
+                let is_model = || self.models.contains(parent);
+                if is_site() || is_level() || is_lift() || is_model() {
                     Some(target)
                 } else {
                     None

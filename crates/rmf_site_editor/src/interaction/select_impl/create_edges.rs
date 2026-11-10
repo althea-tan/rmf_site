@@ -21,7 +21,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use crossflow::*;
-use rmf_site_format::{Edge, Side};
+use rmf_site_format::{Edge, Group, ModelMarker, Side};
 use std::borrow::Borrow;
 
 pub fn spawn_create_edges_service(
@@ -263,6 +263,7 @@ pub fn on_select_for_create_edges(
     mut commands: Commands,
     parents: Query<&ChildOf>,
     lifts: Query<(), With<LiftCabin<Entity>>>,
+    models: Query<(), (With<ModelMarker>, Without<Group>)>,
     cursor: Res<Cursor>,
 ) -> SelectionNodeResult {
     let mut access = access.get_mut(&key).or_broken_buffer()?;
@@ -275,7 +276,13 @@ pub fn on_select_for_create_edges(
                 let edge = edges.get(preview.edge).or_broken_query()?;
                 if preview.side == Side::end() {
                     // Check if the current level matches the level of the previously placed anchor
-                    if !are_anchors_siblings(edge.start(), selection.candidate, &parents, &lifts)? {
+                    if !are_anchors_siblings(
+                        edge.start(),
+                        selection.candidate,
+                        &parents,
+                        &lifts,
+                        &models,
+                    )? {
                         // Perform the backout before assigning the candidate anchor
                         let _ = backout(state, &mut edges, &cursor, &mut commands);
                     }

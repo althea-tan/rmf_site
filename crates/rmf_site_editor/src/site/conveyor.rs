@@ -388,14 +388,22 @@ pub fn update_conveyor_dimensions(
     dependents: Query<&Dependents, With<Anchor>>,
     mut removed_pending: RemovedComponents<Pending>,
     mut removed_original_edges: RemovedComponents<Original<Edge<Entity>>>,
+    conveyor_ports: Query<(Ref<ConveyorPort>, &ChildOf)>,
+    model_scales: Query<&Scale, (With<ModelMarker>, Without<Group>)>,
 ) {
     let placed_conveyors: HashSet<Entity> = removed_pending
         .read()
         .chain(removed_original_edges.read())
         .collect();
 
-    // Collect conveyors whose endpoints, dimensions, or placement state changed.
-    let mut changed_dims: HashSet<Entity> = HashSet::new();
+    let has_changed_port = |edge: &Edge<Entity>| -> bool {
+        edge.array()
+            .into_iter()
+            .any(|e| conveyor_ports.get(e).is_ok_and(|(p, _)| p.is_changed()))
+    };
+
+    // Collect conveyors whose endpoints, dimensions, ports, or placement state changed.
+    let mut changed_dims: HashMap<Entity, bool> = HashMap::new();
     let changed_conveyors: Vec<Entity> = conveyors
         .iter_mut()
         .filter_map(|(e, edge, h, w, t, _, original)| {
@@ -405,15 +413,40 @@ pub fn update_conveyor_dimensions(
             }
             let dim_changed = h.is_changed() || w.is_changed() || t.is_changed();
             if dim_changed {
-                changed_dims.insert(e);
+                changed_dims.insert(e, t.is_changed() && !h.is_changed());
             }
-            (edge.is_changed() || dim_changed || placed_conveyors.contains(&e)).then_some(e)
+            (edge.is_changed()
+                || dim_changed
+                || placed_conveyors.contains(&e)
+                || has_changed_port(&edge))
+            .then_some(e)
         })
         .collect();
 
     if changed_conveyors.is_empty() {
         return;
     }
+
+    let snap_height_to_port =
+        |port_height: f32, thickness: f32| port_height - thickness.max(0.001) / 2.0;
+    let get_port = |port_entity: Entity| -> Option<(Ref<ConveyorPort>, f32)> {
+        let (port, child_of) = conveyor_ports.get(port_entity).ok()?;
+        let scale = model_scales.get(child_of.parent()).ok()?;
+        let height = port.location[2] * scale.0.z;
+        Some((port, height))
+    };
+    // Find a port on either endpoint of the edge, prioritizing a newly edited port.
+    let find_port = |edge: &Edge<Entity>| {
+        let end_port = get_port(edge.end());
+        let start_port = get_port(edge.start());
+        if end_port.as_ref().is_some_and(|(p, _)| p.is_changed()) {
+            end_port
+        } else if start_port.as_ref().is_some_and(|(p, _)| p.is_changed()) {
+            start_port
+        } else {
+            end_port.or(start_port)
+        }
+    };
 
     let mut visited: HashSet<Entity> = HashSet::new();
     let mut updates: HashMap<Entity, (f32, f32, f32)> = HashMap::new();
@@ -441,26 +474,52 @@ pub fn update_conveyor_dimensions(
         );
 
         if pending.is_some() {
-            // If previewing a new conveyor, adopt neighbor dimensions or fall back to defaults
-            let neighbor_dims = connected_conveyors.iter().find_map(|&member| {
+            // If previewing a new conveyor, adopt port/neighbor dimensions or fall back to defaults
+            let mut port = find_port(&edge);
+            let mut neighbor_dims = None;
+            for &member in &connected_conveyors {
                 if member == e {
-                    return None;
+                    continue;
                 }
-                let (_, _, h, w, t, ..) = conveyors.get(member).ok()?;
-                Some((h.0, w.0, t.0))
-            });
-            let dims = neighbor_dims.unwrap_or((
-                DEFAULT_CONVEYOR_HEIGHT,
-                DEFAULT_CONVEYOR_WIDTH,
-                DEFAULT_CONVEYOR_THICKNESS,
-            ));
-            updates.insert(e, dims);
+                let Ok((_, member_edge, h, w, t, ..)) = conveyors.get(member) else {
+                    continue;
+                };
+                port = port.or_else(|| find_port(&member_edge));
+                neighbor_dims.get_or_insert((h.0, w.0, t.0));
+            }
+
+            // Inherit thickness from a neighbor (or default), and prioritize a connected
+            // port's width and top-aligned height before falling back to neighbor or default.
+            let target_t = neighbor_dims
+                .map(|(_, _, t)| t)
+                .unwrap_or(DEFAULT_CONVEYOR_THICKNESS);
+            let target_w = port
+                .as_ref()
+                .and_then(|(p, _)| p.width)
+                .or_else(|| neighbor_dims.map(|(_, w, _)| w))
+                .unwrap_or(DEFAULT_CONVEYOR_WIDTH);
+            let target_h = port
+                .as_ref()
+                .map(|(_, h)| snap_height_to_port(*h, target_t))
+                .or_else(|| neighbor_dims.map(|(h, _, _)| h))
+                .unwrap_or(DEFAULT_CONVEYOR_HEIGHT);
+
+            let dims = (target_h, target_w, target_t);
+            if port.is_some() {
+                updates.extend(connected_conveyors.into_iter().map(|m| (m, dims)));
+            } else {
+                updates.insert(e, dims);
+            }
         } else {
             // If it is a placed chain, prioritize inspector dimension edits over existing
             // stationary members, falling back to the newly connected segment's dimensions.
+            let mut active_port = None;
+            let mut fallback_port = None;
             let mut edited_dims = None;
             let mut existing_dims = None;
             let mut fallback_dims = None;
+            let mut snap_to_port = false;
+            let mut thickness_edited = false;
 
             for &member in &connected_conveyors {
                 let Ok((_, member_edge, h, w, t, member_pending, member_original)) =
@@ -475,23 +534,54 @@ pub fn update_conveyor_dimensions(
 
                 let member_edge_changed =
                     member_edge.is_changed() || placed_conveyors.contains(&member);
+                let member_changed = member_edge_changed || has_changed_port(&member_edge);
+                if member_changed {
+                    snap_to_port = true;
+                }
+
+                // Prioritize a newly connected or edited port over stationary ports on the chain.
+                if let Some(member_port) = find_port(&member_edge) {
+                    if member_changed {
+                        active_port.get_or_insert(member_port);
+                    } else {
+                        fallback_port.get_or_insert(member_port);
+                    }
+                }
+
+                // Ignore newly placed/reconnected segments when picking edited or stationary
+                // chain dimensions, and track thickness edits to keep the top surface aligned.
                 let dims = (h.0, w.0, t.0);
-                if !member_edge_changed && changed_dims.contains(&member) {
-                    edited_dims = Some(dims);
+                if !member_edge_changed {
+                    if let Some(&t_changed) = changed_dims.get(&member) {
+                        edited_dims = Some(dims);
+                        thickness_edited = t_changed;
+                    }
+                    existing_dims.get_or_insert(dims);
                 }
-                if !member_edge_changed && existing_dims.is_none() {
-                    existing_dims = Some(dims);
+                fallback_dims.get_or_insert(dims);
+            }
+
+            let Some((mut target_h, mut target_w, target_t)) =
+                edited_dims.or(existing_dims).or(fallback_dims)
+            else {
+                continue;
+            };
+
+            // Snap chain height/width to a connected conveyor port when a connection,
+            // port configuration, or belt thickness changes.
+            if let Some((ref port, port_h)) = active_port.or(fallback_port) {
+                if snap_to_port || thickness_edited {
+                    target_h = snap_height_to_port(port_h, target_t);
                 }
-                if fallback_dims.is_none() {
-                    fallback_dims = Some(dims);
+                if snap_to_port {
+                    if let Some(port_w) = port.width {
+                        target_w = port_w;
+                    }
                 }
             }
 
-            if let Some(dims) = edited_dims.or(existing_dims).or(fallback_dims) {
-                for member in connected_conveyors {
-                    updates.insert(member, dims);
-                }
-            }
+            let dims = (target_h, target_w, target_t);
+            updates.extend(connected_conveyors.into_iter().map(|m| (m, dims)));
         }
     }
 
