@@ -19,6 +19,7 @@ use crate::*;
 #[cfg(feature = "bevy")]
 use bevy::prelude::{Bundle, Component, Deref, DerefMut};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub const DEFAULT_CONVEYOR_HEIGHT: f32 = 0.5;
 pub const DEFAULT_CONVEYOR_WIDTH: f32 = 0.319;
@@ -34,6 +35,8 @@ pub struct Conveyor<T: RefTrait> {
     pub width: ConveyorWidth,
     #[serde(default, skip_serializing_if = "is_default")]
     pub thickness: ConveyorThickness,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub graphs: AssociatedGraphs<T>,
     #[serde(skip)]
     pub marker: ConveyorMarker,
 }
@@ -72,13 +75,27 @@ impl Default for ConveyorThickness {
 #[cfg_attr(feature = "bevy", derive(Component))]
 pub struct ConveyorMarker;
 
+impl<T: RefTrait> Conveyor<T> {
+    pub fn convert<U: RefTrait>(&self, id_map: &HashMap<T, U>) -> Result<Conveyor<U>, T> {
+        Ok(Conveyor {
+            anchors: self.anchors.convert(id_map)?,
+            height: self.height,
+            width: self.width,
+            thickness: self.thickness,
+            graphs: self.graphs.convert(id_map)?,
+            marker: Default::default(),
+        })
+    }
+}
+
 impl<T: RefTrait> From<Edge<T>> for Conveyor<T> {
     fn from(anchors: Edge<T>) -> Self {
         Self {
             anchors,
-            height: ConveyorHeight::default(),
-            width: ConveyorWidth::default(),
-            thickness: ConveyorThickness::default(),
+            height: Default::default(),
+            width: Default::default(),
+            thickness: Default::default(),
+            graphs: Default::default(),
             marker: Default::default(),
         }
     }

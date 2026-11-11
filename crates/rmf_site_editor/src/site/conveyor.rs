@@ -17,9 +17,10 @@
 
 use crate::{
     interaction::billboard::Billboard,
+    recency::RecencyRank,
     site::{
-        Anchor, AnchorBundle, AnchorParams, Category, Delete, Dependents, EdgeLabels, Original,
-        Pending, SiteAssets, Subordinate,
+        Anchor, AnchorBundle, AnchorParams, Category, Delete, Dependents, EdgeLabels, GraphSelect,
+        Original, Pending, SiteAssets, Subordinate,
     },
 };
 use bevy::{
@@ -32,9 +33,10 @@ use bevy::{
 use bevy_rich_text3d::*;
 use rmf_site_camera::MODEL_PREVIEW_LAYER;
 use rmf_site_format::{
-    Affiliation, ConveyorHeight, ConveyorMarker, ConveyorPort, ConveyorPortDirection,
-    ConveyorThickness, ConveyorWidth, Edge, Group, ModelMarker, Scale, DEFAULT_CONVEYOR_HEIGHT,
-    DEFAULT_CONVEYOR_THICKNESS, DEFAULT_CONVEYOR_WIDTH,
+    Affiliation, AssociatedGraphs, ConveyorHeight, ConveyorMarker, ConveyorPort,
+    ConveyorPortDirection, ConveyorThickness, ConveyorWidth, Edge, Group, ModelMarker,
+    NavGraphMarker, Scale, DEFAULT_CONVEYOR_HEIGHT, DEFAULT_CONVEYOR_THICKNESS,
+    DEFAULT_CONVEYOR_WIDTH,
 };
 use rmf_site_mesh::{make_cuboid, WithOutlineMeshExt};
 use rmf_site_picking::{Preview, Selectable};
@@ -242,9 +244,11 @@ pub fn add_conveyor_visuals(
             &ConveyorHeight,
             &ConveyorWidth,
             &ConveyorThickness,
+            &AssociatedGraphs<Entity>,
         ),
         Added<ConveyorMarker>,
     >,
+    graphs: GraphSelect,
     mut dependents: Query<&mut Dependents, With<Anchor>>,
     child_of: Query<&ChildOf>,
     global_transforms: Query<&GlobalTransform>,
@@ -256,7 +260,7 @@ pub fn add_conveyor_visuals(
         return;
     }
 
-    for (e, edge, height, width, thickness) in &new_conveyors {
+    for (e, edge, height, width, thickness, associated_graphs) in &new_conveyors {
         for anchor in &edge.array() {
             if let Ok(mut deps) = dependents.get_mut(*anchor) {
                 deps.insert(e);
@@ -325,6 +329,12 @@ pub fn add_conveyor_visuals(
         let (end, end_belt, end_stand) =
             spawn_end(visuals.end, visuals.end_belt, visuals.end_stand);
 
+        let visibility = if graphs.should_display(associated_graphs) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+
         commands.entity(e).insert((
             ConveyorSegments {
                 start,
@@ -338,7 +348,7 @@ pub fn add_conveyor_visuals(
             },
             visuals.root,
             visuals.root_global_tf,
-            Visibility::Inherited,
+            visibility,
             Category::Conveyor,
             EdgeLabels::StartEnd,
         ));
@@ -770,6 +780,47 @@ pub fn update_changed_conveyor(
             &mesh_handles,
             &mut meshes,
         );
+    }
+}
+
+pub fn update_visibility_for_conveyors(
+    mut conveyors: Query<
+        (&AssociatedGraphs<Entity>, &mut Visibility),
+        (With<ConveyorMarker>, Without<NavGraphMarker>),
+    >,
+    graphs: GraphSelect,
+    conveyors_with_changed_association: Query<
+        Entity,
+        (With<ConveyorMarker>, Changed<AssociatedGraphs<Entity>>),
+    >,
+    graph_changed_visibility: Query<
+        (),
+        (
+            With<NavGraphMarker>,
+            Or<(Changed<Visibility>, Changed<RecencyRank<NavGraphMarker>>)>,
+        ),
+    >,
+    mut removed: RemovedComponents<NavGraphMarker>,
+) {
+    let update_visibility =
+        |(associated, mut visibility): (&AssociatedGraphs<Entity>, Mut<Visibility>)| {
+            let new_visibility = if graphs.should_display(associated) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            if *visibility != new_visibility {
+                *visibility = new_visibility;
+            }
+        };
+    if !graph_changed_visibility.is_empty() || removed.read().next().is_some() {
+        conveyors.iter_mut().for_each(update_visibility);
+    } else {
+        for e in &conveyors_with_changed_association {
+            if let Ok(conveyor) = conveyors.get_mut(e) {
+                update_visibility(conveyor);
+            }
+        }
     }
 }
 

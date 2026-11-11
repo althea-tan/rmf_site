@@ -479,6 +479,9 @@ impl Plugin for SitePlugin {
                 update_visibility_for_lanes
                     .after(remove_association_for_deleted_graphs)
                     .after(add_lane_visuals),
+                update_visibility_for_conveyors
+                    .after(remove_association_for_deleted_graphs)
+                    .after(add_conveyor_visuals),
                 update_visibility_for_locations.after(remove_association_for_deleted_graphs),
                 update_changed_location,
                 update_location_for_moved_anchors,
