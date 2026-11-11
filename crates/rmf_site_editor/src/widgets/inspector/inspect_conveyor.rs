@@ -16,13 +16,17 @@
 */
 
 use crate::{
-    site::{Change, ConveyorHeight, ConveyorThickness, ConveyorWidth},
-    widgets::{inspector::InspectValue, prelude::*, Inspect},
+    site::{
+        Anchor, AnchorBundle, Change, ConveyorHeight, ConveyorNode, ConveyorNodePortConfigs,
+        ConveyorPort, ConveyorPortDirection, ConveyorThickness, ConveyorWidth, Delete, Subordinate,
+        DEFAULT_CONVEYOR_HEIGHT, DEFAULT_CONVEYOR_WIDTH,
+    },
+    widgets::{inspector::InspectValue, prelude::*, Icons, Inspect},
 };
-use bevy::prelude::*;
-use bevy_egui::egui::Ui;
+use bevy::{ecs::hierarchy::ChildOf, prelude::*};
+use bevy_egui::egui::{ComboBox, DragValue, Grid, ImageButton, RichText, Ui};
 use rmf_site_egui::WidgetSystem;
-use rmf_site_format::ConveyorMarker;
+use rmf_site_format::{Affiliation, ConveyorMarker, Group, ModelMarker, Scale};
 
 #[derive(SystemParam)]
 pub struct InspectConveyor<'w, 's> {
@@ -37,6 +41,82 @@ pub struct InspectConveyor<'w, 's> {
         ),
         With<ConveyorMarker>,
     >,
+    models: Query<
+        'w,
+        's,
+        (
+            Option<&'static Children>,
+            &'static Scale,
+            &'static Affiliation<Entity>,
+            &'static GlobalTransform,
+        ),
+        (With<ModelMarker>, Without<Group>, With<ConveyorNode>),
+    >,
+    ports: Query<'w, 's, (&'static ConveyorPort, &'static ChildOf)>,
+    icons: Res<'w, Icons>,
+    delete: EventWriter<'w, Delete>,
+    new_port_direction: Local<'s, ConveyorPortDirection>,
+}
+
+fn show_port_direction(ui: &mut Ui, direction: &mut ConveyorPortDirection) {
+    ComboBox::from_id_salt("conveyor_port_direction")
+        .selected_text(direction.label())
+        .width(0.0)
+        .show_ui(ui, |ui| {
+            for variant in [ConveyorPortDirection::In, ConveyorPortDirection::Out] {
+                ui.selectable_value(direction, variant, variant.label());
+            }
+        });
+}
+
+fn show_port(
+    ui: &mut Ui,
+    entity: Entity,
+    port: &ConveyorPort,
+    model_scale: Vec3,
+    with_labels: bool,
+) -> Option<ConveyorPort> {
+    let mut new_port = port.clone();
+    let scaled_pos = Vec3::from_array(port.location) * model_scale;
+    let mut pos = scaled_pos;
+    let old_width = port.width.unwrap_or(DEFAULT_CONVEYOR_WIDTH);
+    let mut width = old_width;
+
+    let show_field = |ui: &mut Ui, label: &str, add_widget: &mut dyn FnMut(&mut Ui)| {
+        if with_labels {
+            ui.label(label);
+        }
+        add_widget(ui);
+        if with_labels {
+            ui.end_row();
+        }
+    };
+
+    show_field(ui, "Direction", &mut |ui| {
+        ui.push_id(entity, |ui| {
+            show_port_direction(ui, &mut new_port.direction);
+        });
+    });
+    for (label, val) in [("x", &mut pos.x), ("y", &mut pos.y), ("z", &mut pos.z)] {
+        show_field(ui, label, &mut |ui| {
+            ui.add(DragValue::new(val).speed(0.01));
+        });
+    }
+    show_field(ui, "width", &mut |ui| {
+        ui.add(
+            DragValue::new(&mut width)
+                .range(0.001..=std::f32::INFINITY)
+                .speed(0.01),
+        );
+    });
+
+    if pos != scaled_pos {
+        new_port.location = (pos / model_scale).to_array();
+    }
+    if width != old_width {
+        new_port.width = Some(width);
+    }
+    (&new_port != port).then_some(new_port)
 }
 
 impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
@@ -47,6 +127,110 @@ impl<'w, 's> WidgetSystem<Inspect> for InspectConveyor<'w, 's> {
         world: &mut World,
     ) {
         let mut params = state.get_mut(world);
+
+        if let Ok((children, scale, affiliation, model_global_tf)) = params.models.get(selection) {
+            ui.separator();
+            ui.label(RichText::new("Conveyor Ports").size(18.0));
+
+            if children.is_some_and(|c| c.iter().any(|e| params.ports.contains(e))) {
+                Grid::new("inspect_conveyor_node_ports")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Direction");
+                        ui.label("x");
+                        ui.label("y");
+                        ui.label("z");
+                        ui.label("width");
+                        ui.label("");
+                        ui.end_row();
+
+                        for &child in children.into_iter().flatten() {
+                            let Ok((port, _)) = params.ports.get(child) else {
+                                continue;
+                            };
+                            let changed_port = show_port(ui, child, port, scale.0, false);
+                            if ui
+                                .add(ImageButton::new(params.icons.trash.egui()))
+                                .on_hover_text("Remove this port")
+                                .clicked()
+                            {
+                                params.delete.write(Delete::new(child).and_dependents());
+                            }
+                            ui.end_row();
+
+                            if let Some(new_port) = changed_port {
+                                params.commands.trigger(Change::new(new_port, child));
+                            }
+                        }
+                    });
+            }
+
+            ui.add_space(5.0);
+            let add_port = ui
+                .horizontal(|ui| {
+                    let add = ui.button("Add").clicked();
+                    show_port_direction(ui, &mut params.new_port_direction);
+                    add
+                })
+                .inner;
+
+            if add_port {
+                params
+                    .commands
+                    .spawn(
+                        AnchorBundle::new(Anchor::Translate2D([0.0, 0.0]))
+                            .parent_transform(model_global_tf),
+                    )
+                    .insert((
+                        Subordinate(Some(selection)),
+                        ConveyorPort {
+                            direction: *params.new_port_direction,
+                            location: (Vec3::new(0.0, 0.0, DEFAULT_CONVEYOR_HEIGHT) / scale.0)
+                                .to_array(),
+                            width: Some(DEFAULT_CONVEYOR_WIDTH),
+                        },
+                        ChildOf(selection),
+                    ));
+            }
+
+            // Save the current port configurations to the model description to apply across all instances
+            ui.add_space(5.0);
+            if ui.button("Apply to all").clicked() {
+                if let Some(desc_entity) = affiliation.0 {
+                    let configs: Vec<ConveyorPort> = children
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|&child| {
+                            params.ports.get(child).ok().map(|(port, _)| port.clone())
+                        })
+                        .collect();
+                    params
+                        .commands
+                        .entity(desc_entity)
+                        .insert(ConveyorNodePortConfigs(Some(configs)));
+                }
+            }
+            ui.add_space(10.0);
+            return;
+        }
+
+        // Inspect a single selected conveyor port anchor
+        if let Ok((port, child_of)) = params.ports.get(selection) {
+            let Ok((_, scale, _, _)) = params.models.get(child_of.parent()) else {
+                return;
+            };
+
+            ui.separator();
+            ui.label(RichText::new("Conveyor Port").size(18.0));
+            Grid::new("inspect_single_conveyor_port").show(ui, |ui| {
+                if let Some(new_port) = show_port(ui, selection, port, scale.0, true) {
+                    params.commands.trigger(Change::new(new_port, selection));
+                }
+            });
+            ui.add_space(10.0);
+            return;
+        }
+
         let Ok((height, width, thickness)) = params.conveyors.get(selection) else {
             return;
         };
